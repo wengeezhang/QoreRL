@@ -1,0 +1,416 @@
+[
+  {
+    "seed": "seed_0",
+    "step": 40,
+    "triggered": [
+      "blocks.1.moe.experts.2.gate_up"
+    ],
+    "new_overrides": [
+      "blocks.1.moe.experts.2.gate_up"
+    ],
+    "active_overrides": [
+      "blocks.1.moe.experts.2.gate_up"
+    ],
+    "forward_identical": true,
+    "nonselected_gradients_identical": true,
+    "reference_loss_before": 0.00040140748023986816,
+    "mxfp8_loss_before": -0.0,
+    "global_before": {
+      "status": "ok",
+      "cosine": 0.9956521344228343,
+      "reference_norm": 0.5112504752539374,
+      "candidate_norm": 0.4949635529284253
+    },
+    "global_after": {
+      "status": "ok",
+      "cosine": 0.9956521344228773,
+      "reference_norm": 0.5112504752539374,
+      "candidate_norm": 0.4949635529284031
+    },
+    "layers": [
+      {
+        "layer": "blocks.0.attn.qkv",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9954819629602477,
+          "reference_norm": 0.23400925495464966,
+          "candidate_norm": 0.22230990733799752
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9954819629602477,
+          "reference_norm": 0.23400925495464966,
+          "candidate_norm": 0.22230990733799752
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.attn.out",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9943707469635399,
+          "reference_norm": 0.14334558879348974,
+          "candidate_norm": 0.1351970582585393
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9943707469635399,
+          "reference_norm": 0.14334558879348974,
+          "candidate_norm": 0.1351970582585393
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.0.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9947928423310292,
+          "reference_norm": 0.09822058772267991,
+          "candidate_norm": 0.09282235781241895
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9947928423310292,
+          "reference_norm": 0.09822058772267991,
+          "candidate_norm": 0.09282235781241895
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.0.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9950867813214516,
+          "reference_norm": 0.09009808748091333,
+          "candidate_norm": 0.08756435121468076
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9950867813214516,
+          "reference_norm": 0.09009808748091333,
+          "candidate_norm": 0.08756435121468076
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.1.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9941959631462989,
+          "reference_norm": 0.06480559692800207,
+          "candidate_norm": 0.060064112362451336
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9941959631462989,
+          "reference_norm": 0.06480559692800207,
+          "candidate_norm": 0.060064112362451336
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.1.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9943100367677985,
+          "reference_norm": 0.07404077437745007,
+          "candidate_norm": 0.06973653802222667
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9943100367677985,
+          "reference_norm": 0.07404077437745007,
+          "candidate_norm": 0.06973653802222667
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.2.gate_up",
+        "before": {
+          "status": "too_small",
+          "cosine": null,
+          "reference_norm": 0.0,
+          "candidate_norm": 0.0
+        },
+        "triggered": false,
+        "after": {
+          "status": "too_small",
+          "cosine": null,
+          "reference_norm": 0.0,
+          "candidate_norm": 0.0
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.2.down",
+        "before": {
+          "status": "too_small",
+          "cosine": null,
+          "reference_norm": 0.0,
+          "candidate_norm": 0.0
+        },
+        "triggered": false,
+        "after": {
+          "status": "too_small",
+          "cosine": null,
+          "reference_norm": 0.0,
+          "candidate_norm": 0.0
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.3.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9923294017112961,
+          "reference_norm": 0.044788615636783755,
+          "candidate_norm": 0.04441877739347305
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9923294017112961,
+          "reference_norm": 0.044788615636783755,
+          "candidate_norm": 0.04441877739347305
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.0.moe.experts.3.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.995309158296407,
+          "reference_norm": 0.05165938034141642,
+          "candidate_norm": 0.05216022719100034
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.995309158296407,
+          "reference_norm": 0.05165938034141642,
+          "candidate_norm": 0.05216022719100034
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.attn.qkv",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9945939120827859,
+          "reference_norm": 0.14535410689050546,
+          "candidate_norm": 0.1428844181680759
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9945939120827859,
+          "reference_norm": 0.14535410689050546,
+          "candidate_norm": 0.1428844181680759
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.attn.out",
+        "before": {
+          "status": "ok",
+          "cosine": 0.994629857407936,
+          "reference_norm": 0.13658561980020809,
+          "candidate_norm": 0.13843294224790928
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.994629857407936,
+          "reference_norm": 0.13658561980020809,
+          "candidate_norm": 0.13843294224790928
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.0.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9943416134168233,
+          "reference_norm": 0.021823680652203744,
+          "candidate_norm": 0.02006745193481743
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9943416134168233,
+          "reference_norm": 0.021823680652203744,
+          "candidate_norm": 0.02006745193481743
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.0.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9963096249746181,
+          "reference_norm": 0.023543368845789416,
+          "candidate_norm": 0.02068195023767691
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9963096249746181,
+          "reference_norm": 0.023543368845789416,
+          "candidate_norm": 0.02068195023767691
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.1.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9962566039009207,
+          "reference_norm": 0.06728248476091103,
+          "candidate_norm": 0.07015001414985535
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9962566039009207,
+          "reference_norm": 0.06728248476091103,
+          "candidate_norm": 0.07015001414985535
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.1.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9955742398840829,
+          "reference_norm": 0.037918226244517024,
+          "candidate_norm": 0.041538391988819236
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9955742398840829,
+          "reference_norm": 0.037918226244517024,
+          "candidate_norm": 0.041538391988819236
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.2.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": -0.11675441993567319,
+          "reference_norm": 1.370218959518569e-06,
+          "candidate_norm": 1.0258012938994168e-05
+        },
+        "triggered": true,
+        "after": {
+          "status": "ok",
+          "cosine": -0.11680046500000658,
+          "reference_norm": 1.370218959518569e-06,
+          "candidate_norm": 1.0256930601423046e-05
+        },
+        "active": true
+      },
+      {
+        "layer": "blocks.1.moe.experts.2.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.16221148612236372,
+          "reference_norm": 1.2245314696880864e-06,
+          "candidate_norm": 9.236438547013568e-06
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.16221148612236372,
+          "reference_norm": 1.2245314696880864e-06,
+          "candidate_norm": 9.236438547013568e-06
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.3.gate_up",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9934318077025671,
+          "reference_norm": 0.04336113984233694,
+          "candidate_norm": 0.041011827002117064
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9934318077025671,
+          "reference_norm": 0.04336113984233694,
+          "candidate_norm": 0.041011827002117064
+        },
+        "active": false
+      },
+      {
+        "layer": "blocks.1.moe.experts.3.down",
+        "before": {
+          "status": "ok",
+          "cosine": 0.9961476751721878,
+          "reference_norm": 0.05497009980398674,
+          "candidate_norm": 0.0527656336749677
+        },
+        "triggered": false,
+        "after": {
+          "status": "ok",
+          "cosine": 0.9961476751721878,
+          "reference_norm": 0.05497009980398674,
+          "candidate_norm": 0.0527656336749677
+        },
+        "active": false
+      }
+    ],
+    "reference_expert_counts": {
+      "blocks.0.moe": [
+        144,
+        216,
+        48,
+        232
+      ],
+      "blocks.1.moe": [
+        89,
+        215,
+        104,
+        232
+      ]
+    },
+    "mxfp8_expert_counts": {
+      "blocks.0.moe": [
+        144,
+        216,
+        48,
+        232
+      ],
+      "blocks.1.moe": [
+        81,
+        223,
+        112,
+        224
+      ]
+    },
+    "baseline_trial": {
+      "mxfp8_loss_after": -0.004993014968931675,
+      "bf16_loss_after": -0.006765506695955992,
+      "unclipped_grad_norm": 0.49496352672576904,
+      "update_norm": 0.055582651663028095,
+      "reference_gradient_dot_update": -0.007440503821911422
+    },
+    "candidate_trial": {
+      "mxfp8_loss_after": -0.004993014968931675,
+      "bf16_loss_after": -0.006765506695955992,
+      "unclipped_grad_norm": 0.49496352672576904,
+      "update_norm": 0.05558265147633942,
+      "reference_gradient_dot_update": -0.007440503821907883
+    },
+    "seconds": 0.10428079217672348
+  }
+]

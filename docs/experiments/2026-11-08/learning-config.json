@@ -1,0 +1,36 @@
+{
+  "args": {
+    "steps": 100,
+    "warmup_steps": 5,
+    "calibration_interval": 20,
+    "seeds": "0,1,2",
+    "arms": "bf16,mxfp8,adaptive",
+    "prompts": 8,
+    "group_size": 8,
+    "lr": 0.001,
+    "warmup_lr": 0.003,
+    "cosine_threshold": 0.0,
+    "min_grad_norm": 1e-08,
+    "max_grad_norm": 1.0,
+    "hidden": 32,
+    "layers": 2,
+    "experts": 4,
+    "threads": 1,
+    "device": "cpu",
+    "no_trial_updates": false,
+    "out": "results/wgrad-learning-20261108"
+  },
+  "model": {
+    "vocab_size": 16,
+    "hidden": 32,
+    "intermediate": 64,
+    "layers": 2,
+    "heads": 4,
+    "experts": 4,
+    "top_k": 2,
+    "max_length": 16
+  },
+  "torch": "2.15.0",
+  "platform": "macOS-26.6.2-arm64-arm-64bit",
+  "backend": "mxfp8_emulated_fp32_gemm"
+}

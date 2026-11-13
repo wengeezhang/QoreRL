@@ -1,0 +1,223 @@
+[
+  {
+    "seed": 0,
+    "arm": "bf16",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9661458333333334,
+    "last_20_reward": 0.980078125,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 0.764093208592385,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 0,
+    "arm": "mxfp8",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9674479166666666,
+    "last_20_reward": 0.97890625,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 1.905409624800086,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 0,
+    "arm": "adaptive",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9674479166666666,
+    "last_20_reward": 0.97890625,
+    "calibration_steps": [
+      20,
+      40,
+      60
+    ],
+    "trigger_events": 1,
+    "recovered_direction_events": 0,
+    "active_overrides": [
+      "blocks.1.moe.experts.2.gate_up"
+    ],
+    "seconds": 1.9767400831915438,
+    "calibration_seconds": 0.21327520767226815
+  },
+  {
+    "seed": 1,
+    "arm": "bf16",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9368489583333334,
+    "last_20_reward": 0.97109375,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 0.8515083752572536,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 1,
+    "arm": "mxfp8",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9356770833333333,
+    "last_20_reward": 0.970703125,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 1.9479813752695918,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 1,
+    "arm": "adaptive",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9356770833333333,
+    "last_20_reward": 0.970703125,
+    "calibration_steps": [
+      20,
+      40,
+      60
+    ],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 1.9179720408283174,
+    "calibration_seconds": 0.13721525017172098
+  },
+  {
+    "seed": 2,
+    "arm": "bf16",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9635416666666666,
+    "last_20_reward": 0.969140625,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 0.8965409169904888,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 2,
+    "arm": "mxfp8",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9627604166666667,
+    "last_20_reward": 0.96796875,
+    "calibration_steps": [],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 1.948761083651334,
+    "calibration_seconds": 0.0
+  },
+  {
+    "seed": 2,
+    "arm": "adaptive",
+    "backend": "mxfp8_emulated_fp32_gemm",
+    "steps": 60,
+    "parameter_count": 59296,
+    "initial_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "final_eval": {
+      "token_accuracy": 1.0,
+      "exact_match": 1.0
+    },
+    "mean_reward": 0.9627604166666667,
+    "last_20_reward": 0.96796875,
+    "calibration_steps": [
+      20,
+      40,
+      60
+    ],
+    "trigger_events": 0,
+    "recovered_direction_events": 0,
+    "active_overrides": [],
+    "seconds": 2.0013764169998467,
+    "calibration_seconds": 0.13254983350634575
+  }
+]
