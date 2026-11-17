@@ -2,6 +2,11 @@
 
 **Practical low-precision reinforcement learning.**
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/qorerl-overview-dark.svg">
+  <img src="docs/assets/qorerl-overview-light.svg" alt="QoreRL project vision: turn quantization and error-mitigation research into tested, composable recipes; observe, pause, adjust, and resume training; explore automatic precision adaptation as a long-term goal." width="1440">
+</picture>
+
 QoreRL is an early-stage, quantization-native reinforcement learning framework being built to make low-precision methods easier to reproduce, compare, and use in training.
 
 The first milestone focuses on configurable precision recipes, numerical diagnostics, and a guided recovery workflow: observe a run, preserve recoverable state when problems arise, present evidence and supported options, and let the user adjust the configuration before resuming. Automatic precision adaptation remains an ongoing research goal, not a prerequisite for a useful first release.

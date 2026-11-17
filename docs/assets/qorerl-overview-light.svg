@@ -1,0 +1,70 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">QoreRL — Low precision. More control.</title>
+  <desc id="desc">Project vision, not a list of shipped features. QoreRL's first milestone turns quantization and error-mitigation research into tested, composable recipes and a guided training workflow: train and observe quality, numerical stability and cost; pause and save on configured alerts; let the user adjust the recipe; resume and evaluate. Long-term research aims at feedback-driven automatic precision adaptation.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L5.5 3.5 L1 6" fill="none" stroke="#137D76" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="arrow-purple" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L5.5 3.5 L1 6" fill="none" stroke="#6952D8" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1440" height="820" rx="26" fill="#F7F9FC"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+
+<text x="56" y="69" font-size="34" font-weight="700"><tspan fill="#6952D8">Qore</tspan><tspan fill="#17243A">RL</tspan></text>
+<rect x="1150" y="37" width="234" height="40" rx="20" fill="#FFFFFF" stroke="#DAE2ED" stroke-width="1.5"/>
+<text x="1267" y="63" font-size="16" font-weight="600" fill="#52617A" text-anchor="middle" letter-spacing="1.8">PROJECT VISION</text>
+<text x="56" y="140" font-size="52" font-weight="700" fill="#17243A" text-anchor="start" letter-spacing="-1.4">Low precision. More control.</text>
+<text x="58" y="183" font-size="25" font-weight="400" fill="#52617A" text-anchor="start">From quantization research to practical reinforcement learning.</text>
+<rect x="56" y="234" width="354" height="408" rx="20" fill="#FFFFFF" stroke="#DAE2ED" stroke-width="1.5"/>
+<rect x="438" y="234" width="568" height="408" rx="20" fill="#FFFFFF" stroke="#DAE2ED" stroke-width="1.5"/>
+<rect x="1034" y="234" width="350" height="408" rx="20" fill="#F2F5F9" stroke="#DAE2ED" stroke-width="1.5" stroke-dasharray="6 6"/>
+<rect x="80" y="257" width="30" height="4" rx="2" fill="#6952D8" stroke="none" stroke-width="1.5"/>
+<rect x="462" y="257" width="30" height="4" rx="2" fill="#137D76" stroke="none" stroke-width="1.5"/>
+<rect x="1058" y="257" width="30" height="4" rx="2" fill="#72809A" stroke="none" stroke-width="1.5"/>
+<text x="80" y="294" font-size="17" font-weight="700" fill="#6952D8" text-anchor="start" letter-spacing="1">01 / RECIPE LIBRARY</text>
+<text x="462" y="294" font-size="17" font-weight="700" fill="#137D76" text-anchor="start" letter-spacing="1">02 / GUIDED TRAINING</text>
+<text x="1058" y="294" font-size="16" font-weight="600" fill="#52617A" text-anchor="start" letter-spacing="0.55">03 / LONG-TERM RESEARCH</text>
+<text x="80" y="335" font-size="28" font-weight="700" fill="#17243A" text-anchor="start" letter-spacing="-0.6">Make methods usable.</text>
+<text x="462" y="335" font-size="30" font-weight="700" fill="#17243A" text-anchor="start" letter-spacing="-0.7">Observe. Adjust. Continue.</text>
+<text x="1058" y="335" font-size="28" font-weight="600" fill="#17243A" text-anchor="start" letter-spacing="-0.5">Toward automatic</text>
+<text x="1058" y="370" font-size="28" font-weight="600" fill="#17243A" text-anchor="start" letter-spacing="-0.5">adaptation</text>
+<rect x="80" y="377" width="306" height="83" rx="12" fill="#F7F9FC" stroke="none" stroke-width="1.5"/>
+<text x="99" y="411" font-size="22" font-weight="500" fill="#17243A" text-anchor="start">Quantization methods</text>
+<text x="99" y="441" font-size="20" font-weight="400" fill="#52617A" text-anchor="start">+ error-mitigation techniques</text>
+<path d="M233 469 V491" fill="none" stroke="#6952D8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-purple)"/>
+<rect x="80" y="501" width="306" height="74" rx="12" fill="#F1EDFF" stroke="none" stroke-width="1.5"/>
+<text x="233" y="532" font-size="23" font-weight="600" fill="#6952D8" text-anchor="middle">Tested, composable</text>
+<text x="233" y="559" font-size="23" font-weight="600" fill="#6952D8" text-anchor="middle">training recipes</text>
+<text x="233" y="612" font-size="20" font-weight="400" fill="#52617A" text-anchor="middle">Select what fits your workload.</text>
+<path d="M386 538 H424 V436 H454" fill="none" stroke="#6952D8" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-purple)"/>
+<text x="462" y="369" font-size="21" font-weight="400" fill="#52617A" text-anchor="start">Quality · Numerical stability · Cost</text>
+<rect x="462" y="397" width="240" height="77" rx="12" fill="#EDF8F5" stroke="none" stroke-width="1.5"/>
+<rect x="742" y="397" width="240" height="77" rx="12" fill="#EDF8F5" stroke="none" stroke-width="1.5"/>
+<rect x="742" y="522" width="240" height="77" rx="12" fill="#EDF8F5" stroke="none" stroke-width="1.5"/>
+<rect x="462" y="522" width="240" height="77" rx="12" fill="#EDF8F5" stroke="none" stroke-width="1.5"/>
+<text x="582" y="430" font-size="23" font-weight="600" fill="#137D76" text-anchor="middle">Train &amp; observe</text>
+<text x="582" y="457" font-size="20" font-weight="400" fill="#52617A" text-anchor="middle">Learning + numerics</text>
+<text x="862" y="430" font-size="23" font-weight="600" fill="#137D76" text-anchor="middle">Pause &amp; save</text>
+<text x="862" y="457" font-size="20" font-weight="400" fill="#52617A" text-anchor="middle">On configured alerts</text>
+<text x="862" y="555" font-size="23" font-weight="600" fill="#137D76" text-anchor="middle">User adjusts recipe</text>
+<text x="862" y="582" font-size="20" font-weight="400" fill="#52617A" text-anchor="middle">Review evidence</text>
+<text x="582" y="555" font-size="23" font-weight="600" fill="#137D76" text-anchor="middle">Resume &amp; evaluate</text>
+<text x="582" y="582" font-size="20" font-weight="400" fill="#52617A" text-anchor="middle">Measure the effect</text>
+<path d="M710 436 H734" fill="none" stroke="#137D76" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M862 482 V514" fill="none" stroke="#137D76" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M734 560 H710" fill="none" stroke="#137D76" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M582 514 V482" fill="none" stroke="#137D76" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M1071 424 V553" fill="none" stroke="#DAE2ED" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 6"/>
+<circle cx="1071" cy="421" r="5" fill="#72809A"/>
+<text x="1090" y="428" font-size="22" font-weight="500" fill="#17243A" text-anchor="start">Compare candidates</text>
+<text x="1090" y="452" font-size="17" font-weight="400" fill="#52617A" text-anchor="start">Measure intervention benefits</text>
+<circle cx="1071" cy="482" r="5" fill="#72809A"/>
+<text x="1090" y="489" font-size="22" font-weight="500" fill="#17243A" text-anchor="start">Validate adjustments</text>
+<text x="1090" y="513" font-size="17" font-weight="400" fill="#52617A" text-anchor="start">Check quality and overhead</text>
+<circle cx="1071" cy="543" r="5" fill="#72809A"/>
+<text x="1090" y="550" font-size="22" font-weight="500" fill="#17243A" text-anchor="start">Adapt precision</text>
+<text x="1090" y="574" font-size="17" font-weight="400" fill="#52617A" text-anchor="start">Act on training feedback</text>
+<text x="1058" y="612" font-size="20" font-weight="400" fill="#52617A" text-anchor="start">Automation is a research goal.</text>
+<path d="M56 687 H1384" fill="none" stroke="#DAE2ED" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="56" y="732" font-size="30" font-weight="600" fill="#17243A" text-anchor="start" letter-spacing="-0.45">Usable recipes. Recoverable training. A path to adaptation.</text>
+<text x="56" y="773" font-size="23" font-weight="400" fill="#52617A" text-anchor="start">Goal: reduce RL compute cost while preserving training quality and stability.</text>
+</g>
+</svg>
