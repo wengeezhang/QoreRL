@@ -8,42 +8,6 @@ The first milestone focuses on configurable precision recipes, numerical diagnos
 
 > **Current implementation:** synchronous GRPO coordinated by Ray, with a Megatron learner and vLLM rollout adapter. The shared training loop, weight publication, and checkpoint/resume are tested locally using explicit CPU test engines. **Megatron + vLLM execution still needs GPU validation.** Low-precision recipes, configurable alert-driven pause, and recipe-changing recovery are the next milestones. The earlier tiny-MoE numerical experiment is retained separately under [Research](#research).
 
-## Start with the training foundation
-
-The first native scenario is **Qwen3-0.6B arithmetic GRPO**, using unquantized BF16 execution before introducing low-precision recipes. Ray places one Megatron learner and one vLLM rollout worker on separate GPUs. Each step collects complete response groups, computes verifiable rewards and group-relative advantages, updates the policy, and publishes the next weight version.
-
-```text
-Megatron learner ── versioned weights ──► vLLM rollout workers
-       ▲                                      │
-       │          Ray coordinator             │
-       └── GRPO batch ◄── reward / grouping ◄──┘
-
-Publish + acknowledge → sample → update → publish + acknowledge → checkpoint
-```
-
-On a compatible NVIDIA GPU environment, with Megatron Bridge/Core, Transformer Engine, and vLLM installed:
-
-```bash
-uv pip install -e .
-qorerl train --config configs/grpo_megatron_vllm.json --out results/native-first-run
-```
-
-The default native configuration requires **two GPUs** and uses a single training rank and TP=1 rollout. Native dependencies are deliberately not installed by the CPU quickstart. See [the execution and environment guide (中文)](docs/ray-grpo.zh-CN.md) for API targets, limitations, checkpoint/resume, and the GPU validation procedure.
-
-To exercise the same Ray coordinator and GRPO implementation **locally without GPUs**:
-
-```bash
-uv sync --group dev
-uv run qorerl train --config configs/grpo_cpu_test.json --out results/ray-local
-uv run pytest -q
-```
-
-This explicit `torch_test` backend uses a small recurrent model and a digit-copy task. It performs real sampling and optimizer updates in separate Ray processes; it does **not** emulate or validate Megatron/vLLM kernels. It is not selected automatically if a GPU dependency is missing.
-
-See the [recorded 40-step local run](docs/experiments/2026-11-17-ray-grpo/README.md) for configuration, metrics, and validation boundaries.
-
-Runs save resolved configuration, worker identities, trajectories with behavior log probabilities and policy versions, per-step metrics, and model/optimizer/RNG checkpoints. Resume currently accepts the same training semantics, with a larger total step count. An invalid batch or failed update/refit stops the run and writes an incident report pointing to the last completed recovery checkpoint.
-
 ## What QoreRL is building
 
 ### 1. Reproducible methods and configurable recipes
