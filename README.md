@@ -25,7 +25,8 @@ Recipe Insights makes each recipe's costs and numerical effects visible, layer b
 
 This catalog tracks quantization methods, error-mitigation techniques, and RL corrections available or planned for QoreRL recipes, along with research candidates. Status refers to **QoreRL integration**, not the maturity of the original paper. Last reviewed: **2026-11-17**.
 
-- **Implemented:** code and local tests are available; native GPU validation is still pending.
+- **Code ready · GPU unvalidated:** implementation and local tests are complete; native GPU execution, learning quality, and performance have not been validated.
+- **GPU validated:** native execution and results have been verified for a documented workload. No recipe has reached this status yet.
 - **Planned:** selected for implementation, but not available yet.
 - **Research:** a candidate to evaluate before committing to an implementation.
 
@@ -33,9 +34,9 @@ This catalog tracks quantization methods, error-mitigation techniques, and RL co
 
 | Recipe / technique | Status | What it is intended to improve | Scope and source |
 | --- | --- | --- | --- |
-| **BF16 reference** | Implemented | Provide a matched reference for learning quality, numerical behavior, and cost. | Single-rank dense Qwen3, Megatron + vLLM. [Configurations and guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
-| **Scoped MXFP8** | Implemented | Run selected MLP down projections in native MXFP8 during training and rollout. | Other operators retain the BF16 baseline. [Recipe guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
-| **Fixed Hadamard + MXFP8** | Implemented | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
+| **BF16 reference** | Code ready · GPU unvalidated | Provide a matched reference for learning quality, numerical behavior, and cost. | Single-rank dense Qwen3, Megatron + vLLM. [Configurations and guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
+| **Scoped MXFP8** | Code ready · GPU unvalidated | Run selected MLP down projections in native MXFP8 during training and rollout. | Other operators retain the BF16 baseline. [Recipe guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
+| **Fixed Hadamard + MXFP8** | Code ready · GPU unvalidated | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
 | **Learnable rotations / Hadamard-based transforms** | Planned | Optimize the rotation rather than relying on one fixed transform. | [SpinQuant](https://arxiv.org/abs/2405.16406) learns orthogonal rotations; [HARP](https://arxiv.org/abs/2605.29843) uses structured, Hadamard-initialized transforms. Both need adaptation from post-training quantization to RL; a standard Hadamard matrix itself is fixed. |
 | **Dynamic SmoothQuant** | Planned | Refresh selected channel scales as activation statistics change during RL. | A QoreRL research extension of [SmoothQuant](https://arxiv.org/abs/2211.10438), whose original method uses offline calibration for deployment. Update frequency, state synchronization, and training benefit require validation. |
 | **Calibrated Clipping** | Planned | Adjust PPO clipping bounds so FP8 ratio distortion does not excessively suppress useful updates. | [UW–Madison / ByteDance Seed](https://arxiv.org/abs/2609.22870): two BF16 forward-only shadow passes, for current and old policies, every 20 steps in the paper. This calibrates clipping, not gradients or a BF16 optimizer step. |
