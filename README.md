@@ -21,6 +21,43 @@ Recipe Insights makes each recipe's costs and numerical effects visible, layer b
 
 *Interface preview with synthetic data. Native GPU measurements and training benefits remain unvalidated.*
 
+## Recipe catalog and roadmap
+
+This catalog tracks quantization methods, error-mitigation techniques, and RL corrections available or planned for QoreRL recipes, along with research candidates. Status refers to **QoreRL integration**, not the maturity of the original paper. Last reviewed: **2026-11-17**.
+
+- **Implemented:** code and local tests are available; native GPU validation is still pending.
+- **Planned:** selected for implementation, but not available yet.
+- **Research:** a candidate to evaluate before committing to an implementation.
+
+**Current focus:** validate the existing BF16 / MXFP8 / fixed-Hadamard paths on GPUs and publish paired measurements through Recipe Insights. GPU runs are pending; the research entries below are not active implementations.
+
+| Recipe / technique | Status | What it is intended to improve | Scope and source |
+| --- | --- | --- | --- |
+| **BF16 reference** | Implemented | Provide a matched reference for learning quality, numerical behavior, and cost. | Single-rank dense Qwen3, Megatron + vLLM. [Configurations and guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
+| **Scoped MXFP8** | Implemented | Run selected MLP down projections in native MXFP8 during training and rollout. | Other operators retain the BF16 baseline. [Recipe guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
+| **Fixed Hadamard + MXFP8** | Implemented | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
+| **Learnable rotations / Hadamard-based transforms** | Planned | Optimize the rotation rather than relying on one fixed transform. | [SpinQuant](https://arxiv.org/abs/2405.16406) learns orthogonal rotations; [HARP](https://arxiv.org/abs/2605.29843) uses structured, Hadamard-initialized transforms. Both need adaptation from post-training quantization to RL; a standard Hadamard matrix itself is fixed. |
+| **Dynamic SmoothQuant** | Planned | Refresh selected channel scales as activation statistics change during RL. | A QoreRL research extension of [SmoothQuant](https://arxiv.org/abs/2211.10438), whose original method uses offline calibration for deployment. Update frequency, state synchronization, and training benefit require validation. |
+| **Calibrated Clipping** | Planned | Adjust PPO clipping bounds so FP8 ratio distortion does not excessively suppress useful updates. | [UW–Madison / ByteDance Seed](https://arxiv.org/abs/2609.22870): two BF16 forward-only shadow passes, for current and old policies, every 20 steps in the paper. This calibrates clipping, not gradients or a BF16 optimizer step. |
+| **TRIAGE: mismatch-aware RL correction** | Research | Reweight trajectory segments using advantage and train–rollout log-probability gaps, with bounded correction for mismatch-amplifying updates. | [TRIAGE](https://arxiv.org/abs/2610.07043) targets native NVFP4 W4A4 learners and samplers. Requires behavior log-probabilities and loss integration; does not certify the true gradient direction. |
+| **FourSight: trajectory filtering** | Research | Filter trajectories with too many or consecutive tokens assigned very low probability by the learner. | The data-selection component of [FourSight](https://arxiv.org/abs/2611.04887), studied in FP4 RL. Evaluate retained data, sampling cost, and learning quality together. |
+| **FourSight: sparse BF16 compensation** | Research | Preserve high-variance activation channels through a sparse BF16 contribution while keeping the bulk computation in NVFP4. | The numerical component of [FourSight](https://arxiv.org/abs/2611.04887), using SpliceGEMM. A separate candidate from trajectory filtering; requires kernel integration. |
+| **QUADS: dual-side error alignment** | Research | Combine weight-only fake quantization in the learner with residual activation compensation in rollout. | [QUADS](https://arxiv.org/abs/2607.15810) studies NVFP4 MoE RL: W4A16 learner versus W4A4 rollout with an additional FP4 residual term. Requires MoE support; not native W4A4 training. |
+| **Quaff: adaptive outlier-channel scaling** | Research | Track changing outlier magnitudes while exploiting relatively stable outlier channel locations. | [Quaff](https://arxiv.org/abs/2505.14742) studies quantized parameter-efficient fine-tuning. Its momentum-based scaling is relevant to dynamic scaling; full-parameter RL needs separate evaluation. |
+| **Smooth-SwiGLU** | Research | Rescale SwiGLU computations with compensation to reduce outlier amplification before the MLP down projection. | [Scaling FP8 training to trillion-token LLMs](https://arxiv.org/abs/2409.12517) studies long pretraining runs. Its value under MXFP8 block scaling and RL must be measured separately. |
+| **Attention output gating** | Research | Let an attention head suppress its update directly, reducing pressure to create extreme activations or attention sinks. | [Quantizable Transformers](https://arxiv.org/abs/2306.12929) · [Gated Attention](https://arxiv.org/abs/2505.06708). Adds a learned gate; existing checkpoints need architectural adaptation and training. |
+| **Clipped softmax** | Research | Allow attention probabilities to reach zero and support no-op heads. | A separate intervention in [Quantizable Transformers](https://arxiv.org/abs/2306.12929). Changes attention semantics and kernel requirements; not PPO clipping. |
+| **Sink-aware normalization: PreAffine / GatedNorm** | Research | Provide explicit rescaling mechanisms instead of relying on residual outliers to modulate normalized representations. | [A Unified View of Attention and Residual Sinks](https://arxiv.org/abs/2601.22966). Requires normalization/architecture changes; the paper does not advocate indiscriminately deleting sinks. |
+| **HALO: forward and backward rotations** | Research | Reduce outlier-related quantization error in both forward and backward matrix multiplications. | [HALO](https://arxiv.org/abs/2501.02625) demonstrates low-precision fine-tuning with broader transform placement than our current MLP-down recipe. Needs Megatron/RL adaptation. |
+| **Four Over Six: adaptive NVFP4 block scaling** | Research | Select per-block scaling toward FP4 values 4 or 6 to reduce quantization error near a block's maximum. | [Four Over Six](https://arxiv.org/abs/2512.02010) has pretraining/inference evidence. A quantizer option requiring consistent scale rules across training, export, and rollout. |
+| **Quartet II / MS-EDEN** | Research | Improve NVFP4 gradient estimation with an unbiased microscaling quantization routine, as an alternative to stochastic rounding. | [Quartet II](https://proceedings.mlr.press/v306/panferov26a.html) provides pretraining evidence and Blackwell kernels; see also the [NVFP4 recipe comparison](https://arxiv.org/abs/2610.24343). Quantizer unbiasedness does not guarantee unbiased RL gradients or convergence. |
+| **Learnable NVFP4 block scales** | Research | Learn weight quantization scales, either alone or jointly with weights, rather than fixing them after calibration. | [NVIDIA Model Optimizer scale learning](https://nvidia.github.io/Model-Optimizer/announcements/20260916-scale-learning.html) supports per-block weight scales in QAT/QAD. RL optimization and export/refit support need validation. |
+| **COAT: optimizer and activation compression** | Research | Reduce training memory by quantizing optimizer states and saved activations, beyond low-precision GEMMs alone. | [COAT](https://arxiv.org/abs/2410.19313) has pretraining/fine-tuning evidence. Needs Megatron optimizer, activation-storage, and checkpoint/recovery integration. |
+
+Methods that alter the forward policy must be supported consistently by training, export, and rollout. Backward-only methods remain learner-specific. Architecture changes, deployment-oriented quantization, and native low-precision training have different integration requirements; appearing in this table does not make them interchangeable or guarantee that combining them will help.
+
+Recipe Insights is shared measurement tooling, not another quantization recipe. Its current periodic BF16 operator probes do **not** implement Calibrated Clipping or automatic repair. Each implemented recipe will gain measured quality/cost comparisons and a documented compatibility scope before being recommended.
+
 ## What QoreRL is building
 
 ### 1. Reproducible methods and configurable recipes
