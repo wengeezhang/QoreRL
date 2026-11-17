@@ -30,7 +30,7 @@ class VLLMRollout:
             raise RuntimeError("vLLM requires a Ray-assigned NVIDIA GPU; no CPU fallback")
         from vllm import LLM
 
-        self.cfg, self.policy = cfg, None
+        self.cfg, self.policy_version = cfg, None
         self.llm = LLM(
             model=cfg.model,
             revision=cfg.model_revision,
@@ -48,16 +48,16 @@ class VLLMRollout:
         )
 
     def install_weights(self, snapshot):
-        validate_install(snapshot, self.policy, self.cfg)
+        validate_install(snapshot, self.policy_version, self.cfg)
         # generate() is blocking; no in-flight requests exist at publication.
         # Prefix caching and CUDA graphs are disabled in this initial refit path.
-        self.policy = None
+        self.policy_version = None
         self.llm.collective_rpc("qorerl_load_weights", args=(snapshot.tensors,), timeout=self.cfg.rpc_timeout)
-        self.policy = snapshot.policy
-        return self.policy
+        self.policy_version = snapshot.policy_version
+        return self.policy_version
 
-    def generate(self, prompts, policy, seed):
-        if self.policy != policy:
+    def generate(self, prompts, policy_version, seed):
+        if self.policy_version != policy_version:
             raise ValueError("Rollout must acknowledge the exact requested policy first")
         from vllm import SamplingParams
 
@@ -97,7 +97,7 @@ class VLLMRollout:
                         ),
                         output.text,
                         output.finish_reason,
-                        policy,
+                        policy_version,
                     )
                 )
         return result

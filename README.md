@@ -11,7 +11,7 @@ QoreRL is an early-stage, quantization-native reinforcement learning framework b
 
 The first milestone focuses on configurable precision recipes, numerical diagnostics, and a guided recovery workflow: observe a run, preserve recoverable state when problems arise, present evidence and supported options, and let the user adjust the configuration before resuming. Automatic precision adaptation remains an ongoing research goal, not a prerequisite for a useful first release.
 
-> **Current implementation:** synchronous GRPO coordinated by Ray, with a Megatron learner and vLLM rollout adapter. The shared training loop, weight publication, and checkpoint/resume are tested locally using explicit CPU test engines. **Megatron + vLLM execution still needs GPU validation.** Low-precision recipes, configurable alert-driven pause, and recipe-changing recovery are the next milestones. The earlier tiny-MoE numerical experiment is retained separately under [Research](#research).
+> **Current implementation:** synchronous GRPO coordinated by Ray, with a Megatron learner and vLLM rollout adapter. The shared training loop, weight publication, and checkpoint/resume are tested locally using explicit CPU test engines. **Megatron + vLLM execution still needs GPU validation.** Low-precision recipes, configurable alert-driven pause, and recipe-changing recovery are the next milestones.
 
 ## What QoreRL is building
 
@@ -129,18 +129,10 @@ QoreRL will reuse existing training and inference infrastructure. Its initial en
 
 Research continues alongside the first milestone. A general automatic-repair solution is not a release requirement.
 
-## Research
-
-The earlier tiny-MoE experiment asks whether periodically comparing gradients with BF16 and restoring selected Wgrad activation operands helps learning. It is a separate hypothesis test, **not the framework's default training strategy**. MXFP8 is numerically emulated with FP32 GEMMs, so its runtime does not measure native acceleration.
-
-- [Experiment semantics and commands (中文)](docs/wgrad-experiment.zh-CN.md)
-- [Recorded CPU results (中文)](docs/experiments/2026-11-08/README.md)
-- [Numerical implementation](qorerl/precision.py) and [calibration](qorerl/calibration.py)
-
-Its CLI is now `uv run qorerl research ...` (or `uv run qorerl-research ...`). Existing experiment artifacts remain unchanged.
-
 ## Development
 
-Development has two parallel tracks: building the practical recipe/diagnostic/recovery workflow, and continuing controlled numerical experiments. Use `uv run ruff check qorerl tests` and `uv run pytest -q` for validation. The numerical emulator includes explicit backward formulas; it is not a claim that quantization has an exact differentiable gradient.
+Development has two parallel tracks: building the practical recipe/diagnostic/recovery workflow, and continuing controlled numerical experiments. Use `uv run ruff check qorerl tests` and `uv run pytest -q` for validation.
+
+See the [design principles](design.md), [implementation TODOs](todo.md), and [developer guide (中文)](docs/ray-grpo.zh-CN.md).
 
 Design discussions and experiment proposals are welcome through [GitHub Issues](https://github.com/wengeezhang/QoreRL/issues).

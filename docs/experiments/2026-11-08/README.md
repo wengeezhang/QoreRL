@@ -1,5 +1,11 @@
 # 2026-11-08：tiny MoE Wgrad 激活恢复实验记录
 
+> **历史研究记录。** 这套独立的 tiny-MoE 数值实验代码已经从当前源码移除，不是 QoreRL 当前训练入口或默认修复策略。本目录保留当时的配置、原始结果和报告，供后续研究参考；不代表原生 MXFP8 已完成验证。
+
+原实验实现及运行说明保存在固定历史版本 [`b7df310a8f5d04b4c1b5bea388c4068ef366d01c`](https://github.com/wengeezhang/QoreRL/tree/b7df310a8f5d04b4c1b5bea388c4068ef366d01c)：[实验入口](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/experiment.py)、[量化与反向实现](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/precision.py)、[校准逻辑](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/calibration.py)、[完整运行说明](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/docs/wgrad-experiment.zh-CN.md)。
+
+**下文的 `qorerl research` 命令仅适用于上述历史版本的独立 checkout。** 当前版本不提供该命令。原始 JSON 和报告保留当时的字段与数值；文中测试数量也仅描述当次验证。
+
 ## 已验证的范围
 
 在 Apple Silicon CPU 上，完成了单进程 tiny MoE 的 GRPO 风格训练以及周期校准闭环。模型 59,296 个参数，2 层、每层 4 专家、top-2。全部 MXFP8 结果来自数值仿真，**不是 Blackwell/TE 原生训练结果**。
@@ -62,7 +68,7 @@ uv run qorerl research --steps 100 --warmup-steps 5 --seeds 0,1,2 \
 
 触发控制逻辑另有明确标注的故障注入单测。该单测只证明程序分支可运行，不作为训练效果证据。
 
-## 当前结论
+## 当时的实验结论
 
 已经验证训练、周期对照、自动触发和 Wgrad-only 干预的实现闭环。尚未证明这种修复能提高学习质量：第一轮那次自然触发未改善局部梯度方向；第二轮没有触发，无法评价修复收益。
 

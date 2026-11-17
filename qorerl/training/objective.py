@@ -8,6 +8,20 @@ import torch
 from torch.nn import functional as F
 
 
+def compute_group_advantages(rewards, group_size):
+    """Standardize contiguous complete groups using population std and epsilon 1e-6."""
+    if type(group_size) is not int or group_size < 2:
+        raise ValueError("GRPO group_size must be an integer >= 2")
+    if rewards.ndim != 1 or not rewards.numel() or rewards.numel() % group_size:
+        raise ValueError("Rewards must be a nonempty vector of complete groups")
+    if not rewards.is_floating_point() or not torch.isfinite(rewards).all():
+        raise ValueError("Rewards must be finite floating-point values")
+    grouped = rewards.reshape(-1, group_size)
+    return (
+        (grouped - grouped.mean(-1, keepdim=True)) / (grouped.std(-1, unbiased=False, keepdim=True) + 1e-6)
+    ).flatten()
+
+
 def grpo_loss(logits, batch, clip_epsilon):
     if logits.shape[:2] != batch.labels.shape:
         raise ValueError("Engine must return [batch, sequence, vocabulary] logits")

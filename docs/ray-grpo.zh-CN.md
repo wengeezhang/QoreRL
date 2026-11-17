@@ -11,11 +11,11 @@
 ```text
 driver / coordinator：不执行模型 forward，不直接取得完整权重
   │
-  ├─ Ray learner actor → Megatron Core + Transformer Engine，GPU 0
+  ├─ RayLearnerWorker → Megatron Core + Transformer Engine，GPU 0
   │    load HF → Bridge 转为 Megatron 模型 → BF16 forward/backward
-  │    FP32 master parameters / 梯度累积 / AdamW states
+  │    FP32 master parameters / FP32 跨 microbatch 梯度累积 / AdamW states
   │
-  └─ Ray rollout actor → vLLM，GPU 1
+  └─ RayRolloutWorker → vLLM，GPU 1
        接收 learner 导出的权重 → load_weights → 确认版本 → 采样
 ```
 
@@ -47,14 +47,14 @@ loss        = mean_over_responses(mean_over_response_tokens(term_t))
 
 两端即使都是 BF16，也可能因算子和批处理差异得到不同 log-prob。日志的 `ratio_mean`、`abs_log_ratio_mean` 用来观察这种差异；它们不保证训练稳定。如果 `update_epochs > 1`，这些日志还包含当前策略更新造成的偏离，不能全归因于训推数值差异。
 
-loss 按回答等权。microbatch 的梯度乘以 `该 microbatch 的回答数 / 整批回答数`，再累积；不能把大小不同的 microbatch loss 不加区分地平均。FP32 master gradient 在整个 batch 累积结束后裁剪并交给 AdamW。全零优势 batch 不推进 Adam 动量，避免无学习信号时仍因历史动量改变参数。
+loss 按回答等权。microbatch 的梯度乘以 `该 microbatch 的回答数 / 整批回答数`，再累积；不能把大小不同的 microbatch loss 不加区分地平均。模型梯度先在模型 dtype 中产生，再转为 FP32 累积到 master gradient；这不等于 backward 的全部计算与梯度存储都是 FP32。FP32 master gradient 在整个 batch 累积结束后裁剪并交给 AdamW。全零优势 batch 不推进 Adam 动量，避免无学习信号时仍因历史动量改变参数。
 
 ## 3. 三个边界为什么这样划分
 
 | 边界 | 本次实现 | 后续扩展位置 |
 | --- | --- | --- |
 | 算法与引擎 | 算法接收轨迹、logits、mask、advantage；不依赖 Megatron 层名称 | 可更换算法或量化 recipe，不重写调度循环 |
-| 训练与采样 | `PolicyVersion(weights, recipe)`，发布后必须收到所有 ack | 量化状态、异步陈旧度、恢复都要明确对应的版本 |
+| 训练与采样 | `PolicyVersion(weight_version, recipe_id)`，发布后必须收到所有 ack | 量化状态、异步陈旧度、恢复都要明确对应的版本 |
 | 权重导出与传输 | Bridge 导出 HF 命名 CPU 张量，经 Ray ObjectRef 交给 rollout | 后续换成 NCCL/IPC/分桶传输，不改变轨迹协议 |
 
 当前只有整批同步，没有 Ray actor 自动重试。更新 optimizer、refit 都不是可以随意重放的幂等操作；中途失败时不会把不明状态当作成功继续采样。
@@ -85,7 +85,7 @@ results/ray-local/
   checkpoints/step-000040/
     metadata.json
     learner.pt                模型、FP32 masters、AdamW state、进度、Torch RNG
-  summary.json                完成情况；明确标记此次是否执行了 native GPU 路径
+  summary.json                完成情况；区分 native GPU 路径执行事实与验收结论
   incident.json               仅失败时产生，记录错误和最近完整 checkpoint
 ```
 
@@ -105,6 +105,10 @@ uv run qorerl train \
 恢复时新建 actor，加载 learner 的完整训练状态，重新导出并同步权重，再生成新轨迹。续训输出写到新目录，原实验不覆盖。
 
 目前只允许改变总步数、checkpoint 频率、RPC timeout 和 actor runtime environment；学习率、batch、recipe、模型版本等语义变化会拒绝。**这里实现的是同配置恢复；用户修改量化 recipe 后恢复的工作流尚未实现。** CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
+
+当前写出 schema 2 checkpoint：版本字段为 `policy_version.weight_version` / `recipe_id`，master 参数为 `master_parameters`。读取仍兼容旧 schema 1 的字段；只转换字段名称，不改变模型、optimizer 或训练语义。新轨迹日志也写出 schema 2；指标中的 `policy_version` 整数字段改名为 `weight_version`。历史归档保留原始字段。
+
+`summary.json` 的 `native_gpu_executed` 仅表示 native 路径完成执行；`native_gpu_acceptance` 为 `not_evaluated` 或 CPU 情况下的 `not_applicable`。它不会因为选用了 GPU backend 就声称完成了下面列出的验收。
 
 失败不会继续尝试更新，不会把异常现场覆盖成新的恢复点。可能丢失距离最近 checkpoint 的若干步；这是明确的恢复语义。
 
@@ -142,18 +146,23 @@ GPU 验收要实际检查：
 
 | 文件 | 职责 |
 | --- | --- |
-| `qorerl/runtime/ray_runtime.py` | Ray placement、actors、同步状态机、checkpoint/incident 生命周期 |
-| `qorerl/training/contracts.py` | 轨迹和权重协议、组完整性检查、response mask |
-| `qorerl/training/objective.py` | GRPO surrogate 和聚合 |
-| `qorerl/training/tasks.py` | 原生整数加法与 CPU 复制测试任务 |
+| `qorerl/runtime/ray_runtime.py` | `run_sync_grpo()`：资源安排、采样/训练/发布顺序与失败处理 |
+| `qorerl/runtime/ray_workers.py` | 薄 Ray worker：持有 engine，承接远程调用 |
+| `qorerl/runtime/checkpoint.py` | checkpoint 原子发布、schema 兼容与恢复配置检查 |
+| `qorerl/training/contracts.py` | 数据与版本协议、样本身份和组完整性检查 |
+| `qorerl/training/batching.py` | `PaddedMicrobatch`、右侧 padding、shift 和 response mask |
+| `qorerl/training/objective.py` | GRPO 组内优势、surrogate 和聚合 |
+| `qorerl/training/tasks.py` | 原生整数加法、CPU 复制任务与精确匹配评分 |
 | `qorerl/engines/megatron.py` | Bridge 加载/导出、Megatron forward |
 | `qorerl/engines/vllm.py` | vLLM 初始化、worker 内 refit、带 log-prob 的采样 |
-| `qorerl/engines/base.py` | 引擎接口、单 rank 梯度累积和 FP32 master optimizer |
+| `qorerl/engines/base.py` | learner/rollout 角色接口 |
+| `qorerl/engines/factory.py` | 延迟加载和选择具体 backend |
+| `qorerl/engines/single_rank_learner.py` | 单 rank GRPO、梯度累积和 FP32 master optimizer |
 
 首期为可核对性选择同步执行、完整 CPU 权重传输、关闭 prefix cache/CUDA graph、保存完整轨迹、普通 padding。它们会带来开销，当前实现不宣称吞吐领先。
 
 后续并行训练应作为 learner 内部 worker group 实现，不能在当前单 rank optimizer 上直接加一个 DP 配置就宣称支持。高性能传输、sequence packing、dynamic batch、异步调度也需要自己的正确性验证。当前协议保留了角色、样本和版本边界，但不代表这些功能已经实现。
 
-研究原型的每 20 步梯度校准不接入这条默认流程。下一步先验证原生 BF16 基线，再为量化 recipe 增加前向/反向/导出/rollout 的能力描述、状态保存和兼容性规则。
+早期独立 tiny-MoE 校准实现已从当前源码移除；[历史结果](experiments/2026-11-08/README.md) 保留为归档。默认流程没有每 20 步梯度校准或自动修复。下一步先验证原生 BF16 基线，再为量化 recipe 增加前向/反向/导出/rollout 的能力描述、状态保存和兼容性规则。
 
 上游接口参考：[Bridge RL integration](https://docs.nvidia.com/nemo/megatron-bridge/latest/bridge-rl-integration.html)、[Bridge provider 0.6.2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/v0.6.2/src/megatron/bridge/models/model_provider.py)、[vLLM LLM 0.32.0](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/llm.py)。这些是接口依据，不替代本项目的端到端测试。

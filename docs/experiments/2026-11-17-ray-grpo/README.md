@@ -27,4 +27,21 @@ reward 来自每步训练采样，不是独立测试集，不据此声称泛化�
 
 本次验证命令：`uv run pytest -q`，32 passed；`uv run ruff check qorerl tests`，通过；`git diff --check`，通过。旧研究实验的测试包含在这 32 项中。
 
+## 职责重构后的回归验证
+
+同日完成 worker/engine 分层、字段改名与旧研究原型清理后，重新运行 `uv run pytest -q`：**37 passed**；`uv run ruff check qorerl tests` 与 `git diff --check` 均通过。新增测试覆盖 schema 1/2 checkpoint 的恢复与 Adam 后续更新，以及版本/recipe 校验。
+
+另外直接读取本次原始运行留下的 schema 1 checkpoint，而非用新代码伪造旧状态：
+
+```bash
+uv run qorerl train \
+  --config configs/grpo_cpu_test.json \
+  --resume results/ray-grpo-local-v1/checkpoints/step-000020 \
+  --out results/ray-grpo-refactor-legacy-resume
+```
+
+将续训结果与原始运行的第 21～40 步比较，仅转换改名字段、排除耗时字段：轨迹、behavior log-prob、奖励、优势值和其余逐步指标完全一致。第 40 步模型、FP32 master 参数、Adam 状态及 Torch RNG 共 36 个张量逐值一致，optimizer 更新次数均为 40。新 checkpoint 使用 schema 2。原始归档文件未改写；新运行产物保留在本地 `results/ray-grpo-refactor-legacy-resume/`。
+
+这项检查验证 CPU 路径的重构与旧状态兼容，不扩大下面的 GPU 验收结论。
+
 下一轮验证应在双 NVIDIA GPU 环境执行 `configs/grpo_megatron_vllm.json`，尤其核对 BF16 log-prob 差异、Bridge 导出与 vLLM refit、有效非零优势组和 checkpoint 恢复。细节见 [执行说明](../../ray-grpo.zh-CN.md)。

@@ -10,69 +10,11 @@ import ray
 from ray.util.placement_group import placement_group, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from qorerl.training.config import TrainConfig
-from qorerl.training.contracts import assemble_batch
-from qorerl.training.tasks import ArithmeticTask, CopyTask
-
-
-def make_engine(role, cfg):
-    if cfg.is_cpu_test:
-        from qorerl.engines.torch_test import TestLearner, TestRollout
-
-        return (TestLearner if role == "learner" else TestRollout)(cfg)
-    if role == "learner":
-        from qorerl.engines.megatron import MegatronLearner
-
-        return MegatronLearner(cfg)
-    from qorerl.engines.vllm import VLLMRollout
-
-    return VLLMRollout(cfg)
-
-
-@ray.remote(max_restarts=0, max_task_retries=0)
-class LearnerActor:
-    def __init__(self, cfg):
-        self.engine = make_engine("learner", cfg)
-
-    def ready(self):
-        return {"role": "learner", "pid": os.getpid(), "node": ray.get_runtime_context().get_node_id()}
-
-    def update(self, batch):
-        return self.engine.update(batch)
-
-    def export_weights(self):
-        return self.engine.export_weights()
-
-    def checkpoint(self):
-        return self.engine.checkpoint()
-
-    def restore(self, payload):
-        self.engine.restore(payload)
-
-    def close(self):
-        self.engine.close()
-
-
-@ray.remote(max_restarts=0, max_task_retries=0)
-class RolloutActor:
-    def __init__(self, cfg):
-        self.engine = make_engine("rollout", cfg)
-
-    def ready(self):
-        return {"role": "rollout", "pid": os.getpid(), "node": ray.get_runtime_context().get_node_id()}
-
-    def install_weights(self, snapshot):
-        return self.engine.install_weights(snapshot)
-
-    def generate(self, prompts, policy, seed):
-        return self.engine.generate(prompts, policy, seed)
-
-    def close(self):
-        self.engine.close()
-
-
-def write_json(path, value):
-    Path(path).write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+from qorerl.runtime.checkpoint import resume_metadata, save_checkpoint, write_json
+from qorerl.runtime.ray_workers import RayLearnerWorker, RayRolloutWorker
+from qorerl.training.contracts import PolicyVersion, TrainingBatch, validate_and_order_trajectories
+from qorerl.training.objective import compute_group_advantages
+from qorerl.training.tasks import ArithmeticTask, CopyTask, exact_match_rewards
 
 
 def append_json(path, value):
@@ -80,43 +22,7 @@ def append_json(path, value):
         stream.write(json.dumps(value, allow_nan=False) + "\n")
 
 
-def save_checkpoint(directory, learner, cfg, step, policy):
-    """Publish a checkpoint directory only after its payload and metadata exist."""
-    root = directory / "checkpoints"
-    root.mkdir(exist_ok=True)
-    temp = root / f".step-{step:06d}.pending"
-    target = root / f"step-{step:06d}"
-    temp.mkdir()
-    (temp / "learner.pt").write_bytes(ray.get(learner.checkpoint.remote(), timeout=cfg.rpc_timeout))
-    write_json(
-        temp / "metadata.json",
-        {
-            "schema": 1,
-            "step": step,
-            "policy": asdict(policy),
-            "config": cfg.to_dict(),
-            "boundary": "all_rollouts_acknowledged_no_inflight_samples",
-        },
-    )
-    temp.rename(target)
-    return str(target.resolve())
-
-
-def resume_metadata(path, cfg):
-    metadata = json.loads((Path(path) / "metadata.json").read_text())
-    if metadata["schema"] != 1:
-        raise ValueError("Unsupported checkpoint schema")
-    previous = TrainConfig(**metadata["config"])
-    allowed = {"steps", "checkpoint_every", "rpc_timeout", "learner_runtime_env", "rollout_runtime_env"}
-    changed = [k for k, v in cfg.to_dict().items() if k not in allowed and previous.to_dict()[k] != v]
-    if changed:
-        raise ValueError(f"Resume currently requires identical training semantics; changed: {changed}")
-    if cfg.steps <= metadata["step"] or metadata["policy"]["weights"] != metadata["step"]:
-        raise ValueError("Resume requires a consistent checkpoint and a larger total steps value")
-    return metadata
-
-
-def run(cfg, output, *, address=None, resume=None):
+def run_sync_grpo(cfg, output, *, address=None, resume=None):
     """One learner rank and independently placed rollout replicas.
 
     State machine: publish/ack -> sample -> assemble -> update -> publish/ack.
@@ -138,7 +44,7 @@ def run(cfg, output, *, address=None, resume=None):
     write_json(directory / "config.json", cfg.to_dict())
     task = CopyTask() if cfg.is_cpu_test else ArithmeticTask(cfg)
     owned_ray = not ray.is_initialized()
-    actors, pg = [], None
+    worker_handles, resource_group = [], None
     last_checkpoint = None
     started = time.perf_counter()
     try:
@@ -151,8 +57,8 @@ def run(cfg, output, *, address=None, resume=None):
         if resources.get("CPU", 0) < required or resources.get("GPU", 0) < gpus * required:
             raise RuntimeError(f"Need {required} CPUs and {gpus * required} GPUs; found {resources}")
         bundles = [{"CPU": 1, **({"GPU": 1} if gpus else {})} for _ in range(required)]
-        pg = placement_group(bundles, strategy="PACK")
-        ray.get(pg.ready(), timeout=cfg.rpc_timeout)
+        resource_group = placement_group(bundles, strategy="PACK")
+        ray.get(resource_group.ready(), timeout=cfg.rpc_timeout)
 
         def actor_options(index, env):
             return dict(
@@ -160,20 +66,20 @@ def run(cfg, output, *, address=None, resume=None):
                 num_gpus=gpus,
                 runtime_env=env,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
-                    placement_group=pg,
+                    placement_group=resource_group,
                     placement_group_bundle_index=index,
                     placement_group_capture_child_tasks=False,
                 ),
             )
 
-        learner = LearnerActor.options(**actor_options(0, cfg.learner_runtime_env)).remote(cfg)
-        actors.append(learner)
-        workers = []
+        learner = RayLearnerWorker.options(**actor_options(0, cfg.learner_runtime_env)).remote(cfg)
+        worker_handles.append(learner)
+        rollout_workers = []
         for i in range(cfg.rollout_workers):
-            worker = RolloutActor.options(**actor_options(i + 1, cfg.rollout_runtime_env)).remote(cfg)
-            workers.append(worker)
-            actors.append(worker)
-        info = ray.get([actor.ready.remote() for actor in actors], timeout=cfg.rpc_timeout)
+            worker = RayRolloutWorker.options(**actor_options(i + 1, cfg.rollout_runtime_env)).remote(cfg)
+            rollout_workers.append(worker)
+            worker_handles.append(worker)
+        info = ray.get([worker.ready.remote() for worker in worker_handles], timeout=cfg.rpc_timeout)
         write_json(directory / "workers.json", {"driver_pid": os.getpid(), "workers": info})
         if resume:
             ray.get(
@@ -182,40 +88,49 @@ def run(cfg, output, *, address=None, resume=None):
 
         def publish():
             # Ray passes this object reference directly to actors. The driver
-            # never fetches full weights. Replace this transport later with NCCL/IPC.
+            # never fetches full weights. Sharded/GPU transports will need a new
+            # payload interface; the current snapshot is a full CPU tensor mapping.
             snapshot = learner.export_weights.remote()
             versions = ray.get(
-                [worker.install_weights.remote(snapshot) for worker in workers], timeout=cfg.rpc_timeout
+                [worker.install_weights.remote(snapshot) for worker in rollout_workers],
+                timeout=cfg.rpc_timeout,
             )
             if any(v != versions[0] for v in versions):
                 raise RuntimeError("Rollout replicas acknowledged different policies")
             return versions[0]
 
-        policy = publish()
+        policy_version = publish()
         first_step = metadata["step"] if metadata else 0
-        if policy.weights != first_step:
+        if policy_version.weight_version != first_step or (
+            metadata and policy_version != PolicyVersion.from_dict(metadata["policy_version"])
+        ):
             raise RuntimeError("Published policy and coordinator progress disagree")
-        last_checkpoint = save_checkpoint(directory, learner, cfg, first_step, policy)
+        last_checkpoint = save_checkpoint(directory, learner, cfg, first_step, policy_version)
         for step in range(first_step + 1, cfg.steps + 1):
             tick = time.perf_counter()
             prompts = task.batch(step, cfg.prompts_per_step, cfg.seed)
             # Every group stays intact on one rollout replica; arrival order is irrelevant.
-            shards = [prompts[i :: cfg.rollout_workers] for i in range(cfg.rollout_workers)]
+            prompt_batches = [prompts[i :: cfg.rollout_workers] for i in range(cfg.rollout_workers)]
             replies = ray.get(
                 [
-                    worker.generate.remote(shard, policy, cfg.seed + step * 1000003)
-                    for worker, shard in zip(workers, shards, strict=True)
+                    worker.generate.remote(prompt_batch, policy_version, cfg.seed + step * 1000003)
+                    for worker, prompt_batch in zip(rollout_workers, prompt_batches, strict=True)
                 ],
                 timeout=cfg.rpc_timeout,
             )
             rollout_seconds = time.perf_counter() - tick
-            batch = assemble_batch(prompts, [t for reply in replies for t in reply], cfg.group_size, policy)
+            trajectories = validate_and_order_trajectories(
+                prompts, [t for reply in replies for t in reply], cfg.group_size, policy_version
+            )
+            rewards = exact_match_rewards(prompts, trajectories)
+            advantages = compute_group_advantages(rewards, cfg.group_size)
+            batch = TrainingBatch(trajectories, rewards, advantages, policy_version)
             update_start = time.perf_counter()
             metrics = ray.get(learner.update.remote(ray.put(batch)), timeout=cfg.rpc_timeout)
             train_seconds = time.perf_counter() - update_start
             sync_start = time.perf_counter()
-            policy = publish()
-            if policy.weights != step or metrics["policy_version"] != step:
+            policy_version = publish()
+            if policy_version.weight_version != step or metrics["weight_version"] != step:
                 raise RuntimeError("Publication did not commit the expected training version")
             metrics.update(
                 step=step,
@@ -233,6 +148,7 @@ def run(cfg, output, *, address=None, resume=None):
             append_json(
                 directory / "trajectories.jsonl",
                 {
+                    "schema": 2,
                     "step": step,
                     "trajectories": [asdict(t) for t in batch.trajectories],
                     "rewards": batch.rewards.tolist(),
@@ -240,13 +156,14 @@ def run(cfg, output, *, address=None, resume=None):
                 },
             )
             if step % cfg.checkpoint_every == 0 or step == cfg.steps:
-                last_checkpoint = save_checkpoint(directory, learner, cfg, step, policy)
+                last_checkpoint = save_checkpoint(directory, learner, cfg, step, policy_version)
             print(
                 f"step={step} reward={metrics['reward_mean']:.3f} "
-                f"ratio={metrics['ratio_mean']:.4f} version={policy.weights}",
+                f"ratio={metrics['ratio_mean']:.4f} version={policy_version.weight_version}",
                 flush=True,
             )
         summary = {
+            "schema": 2,
             "status": "completed",
             "backend": f"{cfg.learner_backend}/{cfg.rollout_backend}",
             "first_step": first_step,
@@ -254,7 +171,8 @@ def run(cfg, output, *, address=None, resume=None):
             "final_metrics": metrics,
             "checkpoint": last_checkpoint,
             "seconds": time.perf_counter() - started,
-            "native_gpu_validated_by_this_run": not cfg.is_cpu_test,
+            "native_gpu_executed": not cfg.is_cpu_test,
+            "native_gpu_acceptance": "not_evaluated" if not cfg.is_cpu_test else "not_applicable",
         }
         write_json(directory / "summary.json", summary)
         return summary
@@ -270,14 +188,14 @@ def run(cfg, output, *, address=None, resume=None):
         )
         raise
     finally:
-        for actor in actors:
+        for worker in worker_handles:
             try:
-                ray.get(actor.close.remote(), timeout=10)
+                ray.get(worker.close.remote(), timeout=10)
             except Exception:
                 pass
             finally:
-                ray.kill(actor, no_restart=True)
-        if pg is not None:
-            remove_placement_group(pg)
+                ray.kill(worker, no_restart=True)
+        if resource_group is not None:
+            remove_placement_group(resource_group)
         if owned_ray:
             ray.shutdown()

@@ -10,11 +10,11 @@ from datetime import timedelta
 
 import torch
 
-from qorerl.engines.base import TorchLearner
+from qorerl.engines.single_rank_learner import SingleRankGRPOLearner
 from qorerl.training.contracts import WeightSnapshot
 
 
-class MegatronLearner(TorchLearner):
+class MegatronLearner(SingleRankGRPOLearner):
     def __init__(self, cfg):
         if not torch.cuda.is_available():
             raise RuntimeError("Megatron requires a Ray-assigned NVIDIA GPU; no CPU fallback")
@@ -78,7 +78,7 @@ class MegatronLearner(TorchLearner):
             name: value.detach().cpu().clone()
             for name, value in self.bridge.export_hf_weights(self.modules, cpu=True, show_progress=False)
         }
-        snapshot = WeightSnapshot(self.policy, self.cfg.model, tensors)
+        snapshot = WeightSnapshot(self.policy_version, self.cfg.model, tensors)
         snapshot.validate()
         return snapshot
 

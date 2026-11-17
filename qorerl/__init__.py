@@ -1,1 +1,1 @@
-"""QoreRL: Ray training infrastructure and independent precision research."""
+"""QoreRL: practical low-precision reinforcement learning."""

@@ -30,7 +30,7 @@ def test_megatron_output_keeps_batch_sequence_and_removes_vocab_padding():
 def test_vllm_publication_failure_does_not_acknowledge_version():
     rollout = VLLMRollout.__new__(VLLMRollout)
     rollout.cfg = TrainConfig()
-    rollout.policy = PolicyVersion(0, rollout.cfg.recipe_id)
+    rollout.policy_version = PolicyVersion(0, rollout.cfg.recipe_id)
 
     def fail(*args, **kwargs):
         raise RuntimeError("injected incomplete refit")
@@ -41,7 +41,7 @@ def test_vllm_publication_failure_does_not_acknowledge_version():
     )
     with pytest.raises(RuntimeError, match="incomplete"):
         rollout.install_weights(snapshot)
-    assert rollout.policy is None
+    assert rollout.policy_version is None
 
 
 def test_vllm_worker_checks_fused_model_parameter_coverage(monkeypatch):
@@ -60,7 +60,7 @@ def test_vllm_worker_checks_fused_model_parameter_coverage(monkeypatch):
 def test_vllm_uses_selected_token_logprob_and_stores_eos(monkeypatch):
     rollout = VLLMRollout.__new__(VLLMRollout)
     rollout.cfg = TrainConfig(group_size=2)
-    rollout.policy = PolicyVersion(0, rollout.cfg.recipe_id)
+    rollout.policy_version = PolicyVersion(0, rollout.cfg.recipe_id)
     prompt = Prompt(4, (1, 3), "2")
 
     def generate(prompts, params, **kwargs):
@@ -84,6 +84,6 @@ def test_vllm_uses_selected_token_logprob_and_stores_eos(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=SimpleNamespace))
     rollout.llm = SimpleNamespace(generate=generate)
-    results = rollout.generate([prompt], rollout.policy, 42)
+    results = rollout.generate([prompt], rollout.policy_version, 42)
     assert [r.sample_id for r in results] == [0, 1]
     assert results[0].response_ids == (6, 2) and results[0].behavior_log_probs == (-0.2, -0.3)

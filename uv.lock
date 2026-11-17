@@ -1133,7 +1133,6 @@ name = "qorerl"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "numpy" },
     { name = "ray" },
     { name = "torch" },
     { name = "transformers" },
@@ -1147,7 +1146,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "numpy", specifier = ">=1.26,<3" },
     { name = "ray", specifier = ">=2.49,<3" },
     { name = "torch", specifier = ">=2.5,<3" },
     { name = "transformers", specifier = ">=4.51,<6" },

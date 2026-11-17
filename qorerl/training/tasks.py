@@ -2,7 +2,18 @@
 
 import random
 
+import torch
+
 from qorerl.training.contracts import Prompt
+
+
+def exact_match_rewards(prompts, ordered_trajectories):
+    """Score validated trajectories in their supplied order for the built-in tasks."""
+    answers = {prompt.group_id: prompt.answer for prompt in prompts}
+    return torch.tensor(
+        [float(item.text.strip() == answers[item.group_id]) for item in ordered_trajectories],
+        dtype=torch.float32,
+    )
 
 
 class CopyTask:
