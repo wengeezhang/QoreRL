@@ -28,7 +28,7 @@ class RolloutEngine(Protocol):
 
 def validate_install(snapshot: WeightSnapshot, current: PolicyVersion | None, cfg):
     snapshot.validate()
-    if snapshot.model_id != cfg.model or snapshot.policy_version.recipe_id != cfg.recipe_id:
+    if snapshot.model_id != cfg.model or snapshot.policy_version.recipe_id != cfg.policy_recipe_id:
         raise ValueError("Model/recipe mismatch during weight publication")
     if current is not None and snapshot.policy_version.weight_version <= current.weight_version:
         raise ValueError("Weight versions must increase on an initialized rollout engine")

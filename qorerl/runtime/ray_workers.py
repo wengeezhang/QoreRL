@@ -14,7 +14,16 @@ class RayLearnerWorker:
         self.engine: LearnerEngine = make_learner_engine(cfg)
 
     def ready(self):
-        return {"role": "learner", "pid": os.getpid(), "node": ray.get_runtime_context().get_node_id()}
+        return {
+            "role": "learner",
+            "pid": os.getpid(),
+            "node": ray.get_runtime_context().get_node_id(),
+            "execution": self.execution_report(),
+        }
+
+    def execution_report(self):
+        report = getattr(self.engine, "execution_report", None)
+        return report() if report is not None else {"backend": "torch_test"}
 
     def update(self, batch):
         return self.engine.update(batch)
@@ -38,7 +47,16 @@ class RayRolloutWorker:
         self.engine: RolloutEngine = make_rollout_engine(cfg)
 
     def ready(self):
-        return {"role": "rollout", "pid": os.getpid(), "node": ray.get_runtime_context().get_node_id()}
+        return {
+            "role": "rollout",
+            "pid": os.getpid(),
+            "node": ray.get_runtime_context().get_node_id(),
+            "execution": self.execution_report(),
+        }
+
+    def execution_report(self):
+        report = getattr(self.engine, "execution_report", None)
+        return report() if report is not None else {"backend": "torch_test"}
 
     def install_weights(self, snapshot):
         return self.engine.install_weights(snapshot)

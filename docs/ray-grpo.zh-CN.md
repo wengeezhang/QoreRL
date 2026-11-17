@@ -1,6 +1,6 @@
 # Ray + Megatron + vLLM：第一条 GRPO 训练链路
 
-本阶段先建立可验证的 BF16 基线。量化 recipe、自动告警后调整 recipe、自动修复都不属于这次的完成项。
+这条链路提供 BF16 基线，并接入了首组 [MXFP8 / MXFP8 + 固定 Hadamard 实验 recipe](recipes/mxfp8-hadamard.zh-CN.md)。自动告警后调整 recipe、自动修复尚未实现。
 
 **验证状态：本地 CPU 的真实 Ray 多进程训练已运行；Megatron + vLLM 适配器已实现，但尚未在 NVIDIA GPU 上验证。** CPU 测试不会假装调用这两个 GPU 引擎，也不能证明它们的数值一致性、性能或 API 组合在真实环境中全部可用。
 
@@ -12,7 +12,7 @@
 driver / coordinator：不执行模型 forward，不直接取得完整权重
   │
   ├─ RayLearnerWorker → Megatron Core + Transformer Engine，GPU 0
-  │    load HF → Bridge 转为 Megatron 模型 → BF16 forward/backward
+  │    load HF → Bridge 转为 Megatron 模型 → 按 recipe 执行前后向（默认 BF16）
   │    FP32 master parameters / FP32 跨 microbatch 梯度累积 / AdamW states
   │
   └─ RayRolloutWorker → vLLM，GPU 1
@@ -47,6 +47,8 @@ loss        = mean_over_responses(mean_over_response_tokens(term_t))
 
 两端即使都是 BF16，也可能因算子和批处理差异得到不同 log-prob。日志的 `ratio_mean`、`abs_log_ratio_mean` 用来观察这种差异；它们不保证训练稳定。如果 `update_epochs > 1`，这些日志还包含当前策略更新造成的偏离，不能全归因于训推数值差异。
 
+`pre_update_ratio_mean`、`pre_update_abs_log_ratio_mean`、`pre_update_clip_fraction` 只统计第一个 update epoch，此时每个 microbatch 都发生在首次 optimizer update 之前，可以与后续参数更新引起的变化区分。它们仍是摘要指标，不覆盖完整差异分布。
+
 loss 按回答等权。microbatch 的梯度乘以 `该 microbatch 的回答数 / 整批回答数`，再累积；不能把大小不同的 microbatch loss 不加区分地平均。模型梯度先在模型 dtype 中产生，再转为 FP32 累积到 master gradient；这不等于 backward 的全部计算与梯度存储都是 FP32。FP32 master gradient 在整个 batch 累积结束后裁剪并交给 AdamW。全零优势 batch 不推进 Adam 动量，避免无学习信号时仍因历史动量改变参数。
 
 ## 3. 三个边界为什么这样划分
@@ -77,6 +79,7 @@ CPU 配置启动 1 个 learner 和 2 个 rollout actor，使用小型 GRU 模型
 ```text
 results/ray-local/
   config.json                 解析后的配置和模型 revision
+  recipe.json                 解析后的数值规格与身份
   workers.json                driver / actors 的 PID 与 Ray node ID
   metrics.jsonl               loss、reward、ratio、clip、梯度范数和各阶段耗时
   trajectories.jsonl          每条回答的 token / behavior log-prob / reward / advantage / 版本
@@ -84,7 +87,7 @@ results/ray-local/
   checkpoints/step-000020/
   checkpoints/step-000040/
     metadata.json
-    learner.pt                模型、FP32 masters、AdamW state、进度、Torch RNG
+    learner.pt                模型、FP32 masters、AdamW state、进度、Torch RNG、recipe state
   summary.json                完成情况；区分 native GPU 路径执行事实与验收结论
   incident.json               仅失败时产生，记录错误和最近完整 checkpoint
 ```
@@ -105,6 +108,8 @@ uv run qorerl train \
 恢复时新建 actor，加载 learner 的完整训练状态，重新导出并同步权重，再生成新轨迹。续训输出写到新目录，原实验不覆盖。
 
 目前只允许改变总步数、checkpoint 频率、RPC timeout 和 actor runtime environment；学习率、batch、recipe、模型版本等语义变化会拒绝。**这里实现的是同配置恢复；用户修改量化 recipe 后恢复的工作流尚未实现。** CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
+
+MXFP8 recipe 的同步和恢复会另外核对实际 target 形状和固定 signs，再重建 rollout 派生缓存。参数与 optimizer 保持原始坐标系。首组 recipe 的执行条件与对照命令见 [recipe 文档](recipes/mxfp8-hadamard.zh-CN.md)。
 
 当前写出 schema 2 checkpoint：版本字段为 `policy_version.weight_version` / `recipe_id`，master 参数为 `master_parameters`。读取仍兼容旧 schema 1 的字段；只转换字段名称，不改变模型、optimizer 或训练语义。新轨迹日志也写出 schema 2；指标中的 `policy_version` 整数字段改名为 `weight_version`。历史归档保留原始字段。
 
@@ -158,11 +163,12 @@ GPU 验收要实际检查：
 | `qorerl/engines/base.py` | learner/rollout 角色接口 |
 | `qorerl/engines/factory.py` | 延迟加载和选择具体 backend |
 | `qorerl/engines/single_rank_learner.py` | 单 rank GRPO、梯度累积和 FP32 master optimizer |
+| `qorerl/recipes/` | 精度规格/状态、固定 Hadamard、TE 与 vLLM MXFP8 适配、GPU 算子 probe |
 
 首期为可核对性选择同步执行、完整 CPU 权重传输、关闭 prefix cache/CUDA graph、保存完整轨迹、普通 padding。它们会带来开销，当前实现不宣称吞吐领先。
 
 后续并行训练应作为 learner 内部 worker group 实现，不能在当前单 rank optimizer 上直接加一个 DP 配置就宣称支持。高性能传输、sequence packing、dynamic batch、异步调度也需要自己的正确性验证。当前协议保留了角色、样本和版本边界，但不代表这些功能已经实现。
 
-早期独立 tiny-MoE 校准实现已从当前源码移除；[历史结果](experiments/2026-11-08/README.md) 保留为归档。默认流程没有每 20 步梯度校准或自动修复。下一步先验证原生 BF16 基线，再为量化 recipe 增加前向/反向/导出/rollout 的能力描述、状态保存和兼容性规则。
+早期独立 tiny-MoE 校准实现已从当前源码移除；[历史结果](experiments/2026-11-08/README.md) 保留为归档。默认流程没有每 20 步梯度校准或自动修复。下一步先验证原生 BF16 基线，再执行已实现的 MXFP8/Hadamard 对照；本地实现不替代 GPU 验收。
 
 上游接口参考：[Bridge RL integration](https://docs.nvidia.com/nemo/megatron-bridge/latest/bridge-rl-integration.html)、[Bridge provider 0.6.2](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/v0.6.2/src/megatron/bridge/models/model_provider.py)、[vLLM LLM 0.32.0](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/entrypoints/llm.py)。这些是接口依据，不替代本项目的端到端测试。

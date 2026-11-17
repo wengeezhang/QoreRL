@@ -1,0 +1,241 @@
+"""CPU contract tests with stub kernels; these do not validate native GPU MXFP8."""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from qorerl.engines.vllm import WeightLoaderExtension
+from qorerl.recipes import vllm_mxfp8 as adapter
+from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, resolve_recipe
+
+
+class _Unquantized:
+    pass
+
+
+class _Linear(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.randn(128, 128, dtype=torch.bfloat16))
+        self.quant_method = _Unquantized()
+        self.tp_size = 1
+
+
+class _Kernel:
+    def __init__(self, config):
+        self.config = config
+        self.last_input = None
+
+    @staticmethod
+    def can_implement(config):
+        return True, None
+
+    def process_weights_after_loading(self, carrier):
+        carrier.weight_scale = torch.nn.Parameter(carrier.weight_scale.flatten(), requires_grad=False)
+
+    def apply_weights(self, carrier, x, bias):
+        self.last_input = x.clone()
+        # Deliberate stub: verifies routing only, not native numerical accuracy.
+        return torch.nn.functional.linear(x, carrier.weight.to(x.dtype), bias)
+
+
+@pytest.fixture
+def stub_runtime(monkeypatch):
+    quantized_inputs = []
+
+    def quantize(value, *, is_sf_swizzled_layout):
+        assert not is_sf_swizzled_layout
+        quantized_inputs.append(value.clone())
+        scales = torch.ones(value.shape[0], value.shape[1] // 32, dtype=torch.uint8)
+        return value.to(torch.float8_e4m3fn), scales
+
+    backend = adapter._Backend(_Kernel, SimpleNamespace, quantize, _Linear, _Unquantized, {})
+    monkeypatch.setattr(adapter, "_load_backend", lambda: backend)
+    monkeypatch.setattr(adapter, "_validate_weight", lambda weight, name: None)
+    model = torch.nn.Module()
+    model.config = SimpleNamespace(model_type="qwen3", num_hidden_layers=2)
+    model.vllm_config = SimpleNamespace(model_config=SimpleNamespace(enforce_eager=True))
+    model.model = torch.nn.Module()
+    model.model.layers = torch.nn.ModuleList()
+    for _ in range(2):
+        layer = torch.nn.Module()
+        layer.mlp = torch.nn.Module()
+        layer.mlp.down_proj = _Linear()
+        model.model.layers.append(layer)
+    return model, quantized_inputs
+
+
+def test_selected_cache_keeps_canonical_parameters_and_rotates_both_operands(stub_runtime):
+    model, quantized_inputs = stub_runtime
+    original = {name: value.detach().clone() for name, value in model.named_parameters()}
+    recipe = resolve_recipe(MXFP8_HADAMARD, {"layers": [1], "block_size": 32, "seed": 7})
+    installed = adapter.install(model, recipe)
+    name = "model.layers.1.mlp.down_proj.weight"
+    assert set(dict(model.named_parameters())) == set(original)
+    for parameter_name, parameter in model.named_parameters():
+        torch.testing.assert_close(parameter, original[parameter_name], rtol=0, atol=0)
+    assert isinstance(model.model.layers[0].mlp.down_proj.quant_method, _Unquantized)
+    torch.testing.assert_close(quantized_inputs[0], installed.state.rotate(original[name], name))
+    target = model.model.layers[1].mlp.down_proj
+    x = torch.randn(3, 128, dtype=torch.bfloat16)
+    output = target.quant_method.apply(target, x)
+    assert output.shape == (3, 128)
+    torch.testing.assert_close(target.quant_method.kernel.last_input, installed.state.rotate(x, name))
+    report = installed.report()
+    assert report["all_targets_executed"]
+    assert report["runtime_targets"][0]["canonical_weight"] == name
+    assert report["runtime_targets"][0]["runtime_module"] == name.removesuffix(".weight")
+    installed.refresh()
+    assert not installed.report()["all_targets_executed"]
+
+
+def test_refit_uses_new_canonical_weights_without_composing_rotation(stub_runtime):
+    model, quantized_inputs = stub_runtime
+    installed = adapter.install(model, resolve_recipe(MXFP8_HADAMARD, {"layers": [1]}))
+    target = model.model.layers[1].mlp.down_proj
+    name = "model.layers.1.mlp.down_proj.weight"
+    new_weight = torch.randn_like(target.weight)
+    with torch.no_grad():
+        target.weight.copy_(new_weight)
+    installed.refresh()
+    installed.refresh()
+    expected = installed.state.rotate(new_weight, name)
+    torch.testing.assert_close(quantized_inputs[-1], expected, rtol=0, atol=0)
+    torch.testing.assert_close(quantized_inputs[-2], expected, rtol=0, atol=0)
+    torch.testing.assert_close(target.weight, new_weight, rtol=0, atol=0)
+    assert installed.refresh_count == 3
+
+
+def test_failed_refresh_blocks_execution_and_does_not_publish_partial_caches(stub_runtime):
+    model, _ = stub_runtime
+    installed = adapter.install(model, resolve_recipe(MXFP8_MLP))
+    old_carriers = [method.carrier for method in installed.methods]
+    target = model.model.layers[1].mlp.down_proj
+    target.weight = torch.nn.Parameter(torch.zeros(128, 64, dtype=torch.bfloat16))
+    with pytest.raises(ValueError, match="shape changed"):
+        installed.refresh()
+    assert not installed.ready
+    assert [method.carrier for method in installed.methods] == old_carriers
+    first = model.model.layers[0].mlp.down_proj
+    with pytest.raises(RuntimeError, match="cache is invalid"):
+        first.quant_method.apply(first, torch.zeros(1, 128, dtype=torch.bfloat16))
+
+
+def test_rejects_partial_install_and_repeated_install(stub_runtime):
+    model, _ = stub_runtime
+    model.model.layers[1].mlp.down_proj.tp_size = 2
+    with pytest.raises(ValueError, match="single-rank"):
+        adapter.install(model, resolve_recipe(MXFP8_MLP))
+    assert isinstance(model.model.layers[0].mlp.down_proj.quant_method, _Unquantized)
+    model.model.layers[1].mlp.down_proj.tp_size = 1
+    adapter.install(model, resolve_recipe(MXFP8_MLP))
+    with pytest.raises(ValueError, match="one-time"):
+        adapter.install(model, resolve_recipe(MXFP8_MLP))
+
+
+def test_native_backend_rejects_unsupported_version_and_cpu(monkeypatch):
+    monkeypatch.setattr(adapter, "version", lambda name: "0.29.0")
+    with pytest.raises(RuntimeError, match="targets vLLM 0.32.0"):
+        adapter._load_backend()
+    monkeypatch.setattr(adapter, "version", lambda name: "0.32.0" if name == "vllm" else "0.7.0.post1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="no CPU/ROCm fallback"):
+        adapter._load_backend()
+
+
+@pytest.mark.parametrize("stage", ["load", "empty", "coverage", "refresh", "sync"])
+def test_worker_refit_failure_invalidates_execution(stub_runtime, monkeypatch, stage):
+    model, _ = stub_runtime
+    installed = adapter.install(model, resolve_recipe(MXFP8_MLP))
+    extension = WeightLoaderExtension()
+    extension.model_runner = SimpleNamespace(model=model)
+    extension.qorerl_recipe_installation = installed
+    tensors = {name: value.detach().clone() for name, value in model.named_parameters()}
+    expected = set(tensors)
+    failure = RuntimeError(f"injected {stage} failure")
+
+    def load_weights(weights):
+        assert not installed.ready  # Invalidated before any canonical write.
+        if stage == "load":
+            raise failure
+        if stage == "empty":
+            return set()
+        if stage == "coverage":
+            return {sorted(expected)[0]}
+        return expected
+
+    def refresh_failure():
+        # Even a refresh failing after publishing must leave execution disabled.
+        installed.ready = True
+        raise failure
+
+    def synchronize():
+        assert installed.ready
+        if stage == "sync":
+            raise failure
+
+    model.load_weights = load_weights
+    if stage == "refresh":
+        monkeypatch.setattr(installed, "refresh", refresh_failure)
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    with pytest.raises(RuntimeError) as caught:
+        extension.qorerl_load_weights(tensors, installed.state.to_dict())
+    if stage in {"load", "refresh", "sync"}:
+        assert caught.value is failure  # Preserve the failure; never return an acknowledgement.
+    assert not installed.ready
+    target = model.model.layers[0].mlp.down_proj
+    with pytest.raises(RuntimeError, match="cache is invalid"):
+        target.quant_method.apply(target, torch.zeros(1, 128, dtype=torch.bfloat16))
+
+
+def test_worker_refit_acknowledges_only_after_cuda_sync(stub_runtime, monkeypatch):
+    model, _ = stub_runtime
+    installed = adapter.install(model, resolve_recipe(MXFP8_MLP))
+    extension = WeightLoaderExtension()
+    extension.model_runner = SimpleNamespace(model=model)
+    extension.qorerl_recipe_installation = installed
+    tensors = {name: value.detach().clone() for name, value in model.named_parameters()}
+    expected = set(tensors)
+    events = []
+
+    def load_weights(weights):
+        assert not installed.ready
+        events.append("load")
+        return expected
+
+    def synchronize():
+        assert installed.ready and installed.refresh_count == 2
+        events.append("sync")
+
+    model.load_weights = load_weights
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
+    assert extension.qorerl_load_weights(tensors, installed.state.to_dict()) == len(expected)
+    assert events == ["load", "sync"]
+    assert installed.ready
+
+
+@pytest.mark.parametrize("malformation", ["missing", "shape", "dtype"])
+def test_worker_rejects_malformed_recipe_weights_before_mutation(stub_runtime, malformation):
+    model, _ = stub_runtime
+    installed = adapter.install(model, resolve_recipe(MXFP8_HADAMARD))
+    extension = WeightLoaderExtension()
+    extension.model_runner = SimpleNamespace(model=model)
+    extension.qorerl_recipe_installation = installed
+    tensors = {name: value.detach().clone() for name, value in model.named_parameters()}
+    name = "model.layers.0.mlp.down_proj.weight"
+    if malformation == "missing":
+        tensors.pop(name)
+    elif malformation == "shape":
+        tensors[name] = tensors[name][:32]
+    else:
+        tensors[name] = tensors[name].float()
+
+    def unexpected_load(weights):
+        pytest.fail("Malformed canonical weights reached the vLLM loader")
+
+    model.load_weights = unexpected_load
+    with pytest.raises(ValueError, match="[Cc]anonical recipe weight"):
+        extension.qorerl_load_weights(tensors, installed.state.to_dict())
+    # Nothing was mutated; the previously installed weights remain usable.
+    assert installed.ready and installed.refresh_count == 1

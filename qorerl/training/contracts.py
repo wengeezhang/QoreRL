@@ -66,6 +66,7 @@ class WeightSnapshot:
     policy_version: PolicyVersion
     model_id: str
     tensors: dict[str, torch.Tensor]
+    recipe_state: dict | None = None
 
     def validate(self):
         if not self.tensors:

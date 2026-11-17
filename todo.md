@@ -1,6 +1,6 @@
 # QoreRL 后续工作
 
-本文件记录已经识别、但不适合在本次职责重构中一并实现的工作。架构原则见 [design.md](design.md)。以下都是待办，不表示已有能力；先完成原生基线验收，再扩展 recipe 与恢复流程。
+本文件记录实现进度与后续工作。架构原则见 [design.md](design.md)。实验 recipe 的本地实现已落地，原生 GPU 基线和收益验收仍待进行；勾选的实现项不代表 GPU 验收通过。
 
 ## P0：原生 BF16 基线验收
 
@@ -15,13 +15,15 @@
 
 ## P1：第一个可用的原生低精度 recipe
 
-触发条件：P0 通过，有可重复运行的 BF16 对照。
+已实现范围见 [MXFP8/Hadamard recipe](docs/recipes/mxfp8-hadamard.zh-CN.md)。GPU 收益验收的前提是 P0 通过、有可重复运行的 BF16 对照。
 
-- [ ] 实现一条原生 MXFP8 训练/导出/rollout 路径，明确 Fprop、Dgrad、Wgrad 的精度与例外层。
-- [ ] 定义 recipe 规格与实际生效身份：方法、作用域、版本、硬件/引擎能力、必要的 scales/history/随机状态。区分影响前向的变更和训练专用的 backward 变更。
-- [ ] 在启动时验证支持条件与组合冲突，不允许只修改 `recipe_id` 就宣称启用了新方案。
+- [x] 实现限定 MLP down projection 的原生 MXFP8 训练/导出/rollout 路径，以及固定 Hadamard 对照；明确 Fprop、Dgrad、Wgrad 精度，其他层保持 BF16。
+- [x] 定义首组 recipe 规格、包含选项的身份、固定 signs/target 状态及同配置恢复检查。未来动态 scales/history 仍需显式扩展。
+- [x] 在启动时验证首组 recipe 的模型、形状、硬件/后端支持条件，不静默 fallback。
+- [ ] 在 GPU 跑算子 probe 和三组 GRPO 配置，确认非零实际更新、refit 和恢复；检查 native quantizer 之间的数值差异。
 - [ ] 为每个 recipe 给出来源、复现配置、测试工作负载、数值结果、训练质量、显存与端到端成本；报告无收益和失败的情况。
-- [ ] 明确权重同步后哪些派生状态必须重建，并检查执行结果；相同量化名称不代替训推一致性检查。
+- [x] 保留 canonical 权重，refit 后重建 vLLM 旋转/量化/kernel layout 缓存，失败时不确认版本；实际 GPU 执行结果检查仍待完成。
+- [ ] 在实测有收益后优化 FWHT CUDA kernel、重复权重变换、缓存显存和同步开销，再扩展 MoE/并行。
 
 验收：在同一真实工作负载上能复现 BF16 与 MXFP8 对照，并且用户能确认实际生效的配置与已知限制。之后逐个引入误差缓解方法，组合需单独验证。
 

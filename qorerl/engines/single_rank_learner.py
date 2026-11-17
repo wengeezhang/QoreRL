@@ -27,13 +27,14 @@ def cpu_tree(value):
 class SingleRankGRPOLearner:
     """Explicit FP32 master weights, FP32 accumulation and AdamW states.
 
-    Model parameters may be BF16. No native MXFP8 or distributed gradient reduction
-    is claimed here. One optimizer step consumes the whole rollout batch per epoch.
+    Model parameters may be BF16; operator precision belongs to the model adapter.
+    There is no distributed reduction. One optimizer step consumes the whole
+    rollout batch per epoch.
     """
 
     def setup_optimizer(self, cfg, model, pad_id, device):
         self.cfg, self.model, self.pad_id, self.device = cfg, model, pad_id, device
-        self.policy_version = PolicyVersion(0, cfg.recipe_id)
+        self.policy_version = PolicyVersion(0, cfg.policy_recipe_id)
         self.parameters = [p for p in model.parameters() if p.requires_grad]
         self.master_parameters = [torch.nn.Parameter(p.detach().float().clone()) for p in self.parameters]
         self.optimizer = torch.optim.AdamW(self.master_parameters, lr=cfg.learning_rate, weight_decay=0.0)
@@ -56,13 +57,19 @@ class SingleRankGRPOLearner:
         sums = dict(loss=0.0, ratio_sum=0.0, abs_log_ratio_sum=0.0, clipped_tokens=0, tokens=0)
         last_norm = 0.0
         active = bool(batch.advantages.count_nonzero())
-        for _ in range(self.cfg.update_epochs):
+        pre_update = dict(ratio_sum=0.0, abs_log_ratio_sum=0.0, clipped_tokens=0, tokens=0)
+        for epoch in range(self.cfg.update_epochs):
             self.optimizer.zero_grad(set_to_none=True)
             for start in range(0, count, self.cfg.micro_batch_size):
                 indices = list(range(start, min(start + self.cfg.micro_batch_size, count)))
                 microbatch = collate_microbatch(batch, indices, self.pad_id, self.device)
                 self.model.zero_grad(set_to_none=True)
                 loss, stats = grpo_loss(self.logits(microbatch.input_ids), microbatch, self.cfg.clip_epsilon)
+                if epoch == 0:
+                    # No optimizer step has happened yet. Same snapshot and
+                    # recorded tokens isolate engine mismatch from policy learning.
+                    for key in pre_update:
+                        pre_update[key] += stats[key]
                 fraction = len(indices) / count
                 # Do not average microbatch means equally: the last may be smaller.
                 if active:
@@ -98,6 +105,9 @@ class SingleRankGRPOLearner:
             "ratio_mean": sums["ratio_sum"] / tokens,
             "abs_log_ratio_mean": sums["abs_log_ratio_sum"] / tokens,
             "clip_fraction": sums["clipped_tokens"] / tokens,
+            "pre_update_ratio_mean": pre_update["ratio_sum"] / pre_update["tokens"],
+            "pre_update_abs_log_ratio_mean": pre_update["abs_log_ratio_sum"] / pre_update["tokens"],
+            "pre_update_clip_fraction": pre_update["clipped_tokens"] / pre_update["tokens"],
             "gradient_norm": last_norm,
             "optimizer_steps": self.optimizer_steps,
             "skipped_zero_advantage": not active,
@@ -116,6 +126,7 @@ class SingleRankGRPOLearner:
                 "optimizer_steps": self.optimizer_steps,
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state() if self.device == "cuda" else None,
+                "recipe_state": self.recipe_state.to_dict() if hasattr(self, "recipe_state") else None,
             },
             stream,
         )
@@ -132,8 +143,12 @@ class SingleRankGRPOLearner:
             saved_parameters = state["master_parameters"]
         else:
             raise ValueError("Checkpoint schema is incompatible")
-        if policy_version.recipe_id != self.cfg.recipe_id:
+        if policy_version.recipe_id != self.cfg.policy_recipe_id:
             raise ValueError("Checkpoint recipe is incompatible")
+        if hasattr(self, "recipe_state"):
+            self.recipe_state.validate(state.get("recipe_state"))
+        elif state.get("recipe_state") is not None:
+            raise ValueError("Checkpoint contains unsupported recipe state")
         self.model.load_state_dict(state["model"], strict=True)
         with torch.no_grad():
             for master, saved in zip(self.master_parameters, saved_parameters, strict=True):

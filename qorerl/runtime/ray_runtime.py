@@ -42,6 +42,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "config.json", cfg.to_dict())
+    write_json(directory / "recipe.json", {**cfg.recipe.to_dict(), "identity": cfg.policy_recipe_id})
     task = CopyTask() if cfg.is_cpu_test else ArithmeticTask(cfg)
     owned_ray = not ray.is_initialized()
     worker_handles, resource_group = [], None
@@ -173,6 +174,9 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
             "seconds": time.perf_counter() - started,
             "native_gpu_executed": not cfg.is_cpu_test,
             "native_gpu_acceptance": "not_evaluated" if not cfg.is_cpu_test else "not_applicable",
+            "execution": ray.get(
+                [worker.execution_report.remote() for worker in worker_handles], timeout=cfg.rpc_timeout
+            ),
         }
         write_json(directory / "summary.json", summary)
         return summary

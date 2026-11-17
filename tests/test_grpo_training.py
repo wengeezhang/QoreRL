@@ -152,6 +152,17 @@ def test_zero_advantage_skips_adam_momentum_update():
         torch.testing.assert_close(a, b, atol=0, rtol=0)
 
 
+def test_pre_update_diagnostics_do_not_include_later_policy_updates():
+    batch = example_batch()
+    single = CPULearner(cpu_config(update_epochs=1, learning_rate=0.01))
+    multiple = CPULearner(cpu_config(update_epochs=2, learning_rate=0.01))
+    first, both = single.update(batch), multiple.update(batch)
+    for key in ("ratio_mean", "abs_log_ratio_mean", "clip_fraction"):
+        assert both[f"pre_update_{key}"] == first[key]
+    assert both["optimizer_steps"] == 2
+    assert both["ratio_mean"] != both["pre_update_ratio_mean"]
+
+
 def test_sampler_records_exact_chosen_probabilities_and_requires_publication():
     cfg = cpu_config(group_size=4, max_new_tokens=3)
     learner, rollout = CPULearner(cfg), CPURollout(cfg)

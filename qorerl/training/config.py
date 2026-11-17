@@ -5,6 +5,8 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from qorerl.recipes.spec import resolve_recipe
+
 
 @dataclass(frozen=True)
 class TrainConfig:
@@ -28,6 +30,7 @@ class TrainConfig:
     checkpoint_every: int = 5
     rpc_timeout: float = 600.0
     recipe_id: str = "bf16-baseline-v1"
+    recipe_options: dict = field(default_factory=dict)
     learner_runtime_env: dict = field(default_factory=dict)
     rollout_runtime_env: dict = field(default_factory=dict)
 
@@ -35,13 +38,23 @@ class TrainConfig:
     def is_cpu_test(self):
         return self.learner_backend == self.rollout_backend == "torch_test"
 
+    @property
+    def recipe(self):
+        return resolve_recipe(self.recipe_id, self.recipe_options)
+
+    @property
+    def policy_recipe_id(self):
+        return self.recipe.identity
+
     def __post_init__(self):
         pair = (self.learner_backend, self.rollout_backend)
         if pair not in {("megatron", "vllm"), ("torch_test", "torch_test")}:
             raise ValueError("Supported pairs: megatron/vllm or explicit torch_test/torch_test")
-        expected = "fp32-test-v1" if self.is_cpu_test else "bf16-baseline-v1"
-        if self.recipe_id != expected:
-            raise ValueError(f"Only {expected!r} is implemented for this backend pair")
+        recipe = self.recipe
+        if self.is_cpu_test and recipe.name != "fp32-test-v1":
+            raise ValueError("CPU test engines only support fp32-test-v1; no native quantization fallback")
+        if not self.is_cpu_test and recipe.name == "fp32-test-v1":
+            raise ValueError("fp32-test-v1 requires the explicit CPU test engines")
         for name in (
             "steps",
             "prompts_per_step",

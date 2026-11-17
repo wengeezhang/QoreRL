@@ -55,7 +55,7 @@ def resume_metadata(path, cfg):
         or step < 0
         or cfg.steps <= step
         or policy_version.weight_version != step
-        or policy_version.recipe_id != cfg.recipe_id
+        or policy_version.recipe_id != cfg.policy_recipe_id
     ):
         raise ValueError("Resume requires a consistent checkpoint and a larger total steps value")
     return {**metadata, "policy_version": asdict(policy_version)}

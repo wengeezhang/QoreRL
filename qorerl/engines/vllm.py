@@ -1,4 +1,4 @@
-"""vLLM rollout adapter; synchronous requests and acknowledged BF16 refits."""
+"""vLLM rollout adapter; canonical-weight refits and explicit recipe rebuilds."""
 
 import torch
 
@@ -9,19 +9,39 @@ from qorerl.training.contracts import Trajectory
 class WeightLoaderExtension:
     """Runs inside vLLM's worker, where the executable model actually lives."""
 
-    def qorerl_load_weights(self, tensors):
+    def qorerl_load_weights(self, tensors, recipe_state=None):
         model = self.model_runner.model
-        loaded = model.load_weights((name, value.to("cuda")) for name, value in tensors.items())
-        if not loaded:
-            raise RuntimeError("vLLM did not report any loaded parameters")
-        # HF names can fuse into qkv/gate_up names. Check coverage against the
-        # executable model's names, not by comparing HF and packed names directly.
-        expected = set(dict(model.named_parameters()))
-        missing = expected - set(loaded)
-        if missing:
-            raise RuntimeError(f"Incomplete vLLM refit: {sorted(missing)}")
-        torch.cuda.synchronize()
+        installation = getattr(self, "qorerl_recipe_installation", None)
+        if installation is not None:
+            installation.state.validate(recipe_state)
+            installation.state.validate_weights(tensors)
+            installation.invalidate()
+        elif recipe_state is not None:
+            raise ValueError("Recipe weights cannot be installed on a BF16 worker")
+        try:
+            loaded = model.load_weights((name, value.to("cuda")) for name, value in tensors.items())
+            if not loaded:
+                raise RuntimeError("vLLM did not report any loaded parameters")
+            # HF names can fuse into qkv/gate_up names. Check coverage against the
+            # executable model's names, not by comparing HF and packed names directly.
+            expected = set(dict(model.named_parameters()))
+            missing = expected - set(loaded)
+            if missing:
+                raise RuntimeError(f"Incomplete vLLM refit: {sorted(missing)}")
+            if installation is not None:
+                installation.refresh()
+            torch.cuda.synchronize()
+        except BaseException:
+            # refresh() publishes its carriers before asynchronous CUDA work is
+            # synchronized. A later failure must also disable those new caches.
+            if installation is not None:
+                installation.invalidate()
+            raise
         return len(loaded)
+
+    def qorerl_execution_report(self):
+        installation = getattr(self, "qorerl_recipe_installation", None)
+        return installation.report() if installation is not None else {"precision": "bf16"}
 
 
 class VLLMRollout:
@@ -31,6 +51,14 @@ class VLLMRollout:
         from vllm import LLM
 
         self.cfg, self.policy_version = cfg, None
+        worker_options = {"worker_extension_cls": "qorerl.engines.vllm.WeightLoaderExtension"}
+        if cfg.recipe.is_mxfp8:
+            worker_options = {
+                "worker_cls": "qorerl.engines.vllm_worker.QoreRLRecipeWorker",
+                "additional_config": {
+                    "qorerl_recipe": {"name": cfg.recipe_id, "options": cfg.recipe_options}
+                },
+            }
         self.llm = LLM(
             model=cfg.model,
             revision=cfg.model_revision,
@@ -44,7 +72,7 @@ class VLLMRollout:
             enforce_eager=True,
             generation_config="vllm",  # Do not inherit HF sampling penalties/filters.
             seed=cfg.seed,
-            worker_extension_cls="qorerl.engines.vllm.WeightLoaderExtension",
+            **worker_options,
         )
 
     def install_weights(self, snapshot):
@@ -52,9 +80,19 @@ class VLLMRollout:
         # generate() is blocking; no in-flight requests exist at publication.
         # Prefix caching and CUDA graphs are disabled in this initial refit path.
         self.policy_version = None
-        self.llm.collective_rpc("qorerl_load_weights", args=(snapshot.tensors,), timeout=self.cfg.rpc_timeout)
+        self.llm.collective_rpc(
+            "qorerl_load_weights",
+            args=(snapshot.tensors, snapshot.recipe_state),
+            timeout=self.cfg.rpc_timeout,
+        )
         self.policy_version = snapshot.policy_version
         return self.policy_version
+
+    def execution_report(self):
+        return {
+            "identity": self.cfg.policy_recipe_id,
+            "workers": self.llm.collective_rpc("qorerl_execution_report", timeout=self.cfg.rpc_timeout),
+        }
 
     def generate(self, prompts, policy_version, seed):
         if self.policy_version != policy_version:

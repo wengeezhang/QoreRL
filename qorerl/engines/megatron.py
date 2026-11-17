@@ -63,6 +63,12 @@ class MegatronLearner(SingleRankGRPOLearner):
         if len(self.modules) != 1:
             raise ValueError("This adapter implements one Megatron rank, not pipeline parallel training")
         self.bridge.load_hf_weights(self.modules)
+        self.recipe_installation = None
+        if cfg.recipe.is_mxfp8:
+            from qorerl.recipes.megatron_mxfp8 import install
+
+            self.recipe_installation = install(self.modules[0], cfg.recipe, hf_config.num_hidden_layers)
+            self.recipe_state = self.recipe_installation.state
         self.setup_optimizer(cfg, self.modules[0], pad_id, "cuda")
 
     def logits(self, input_ids):
@@ -78,9 +84,21 @@ class MegatronLearner(SingleRankGRPOLearner):
             name: value.detach().cpu().clone()
             for name, value in self.bridge.export_hf_weights(self.modules, cpu=True, show_progress=False)
         }
-        snapshot = WeightSnapshot(self.policy_version, self.cfg.model, tensors)
+        if self.recipe_installation is not None:
+            self.recipe_state.validate_weights(tensors)
+        snapshot = WeightSnapshot(
+            self.policy_version,
+            self.cfg.model,
+            tensors,
+            self.recipe_state.to_dict() if self.recipe_installation is not None else None,
+        )
         snapshot.validate()
         return snapshot
+
+    def execution_report(self):
+        if self.recipe_installation is not None:
+            return self.recipe_installation.report()
+        return {"identity": self.cfg.policy_recipe_id, "precision": "bf16", "validation": "pending"}
 
     def close(self):
         from megatron.core import parallel_state

@@ -11,7 +11,9 @@ QoreRL is an early-stage, quantization-native reinforcement learning framework b
 
 The first milestone focuses on configurable precision recipes, numerical diagnostics, and a guided recovery workflow: observe a run, preserve recoverable state when problems arise, present evidence and supported options, and let the user adjust the configuration before resuming. Automatic precision adaptation remains an ongoing research goal, not a prerequisite for a useful first release.
 
-> **Current implementation:** synchronous GRPO coordinated by Ray, with a Megatron learner and vLLM rollout adapter. The shared training loop, weight publication, and checkpoint/resume are tested locally using explicit CPU test engines. **Megatron + vLLM execution still needs GPU validation.** Low-precision recipes, configurable alert-driven pause, and recipe-changing recovery are the next milestones.
+> **Current implementation:** synchronous GRPO coordinated by Ray, with Megatron/vLLM adapters and the first experimental recipes: MXFP8 MLP down projections, with or without fixed Hadamard rotation. Local tests cover training orchestration, transformations, recipe state, refits, and same-configuration recovery. **Native GPU execution, learning quality, and performance remain unvalidated.** Configurable alert-driven pause and recipe-changing recovery are upcoming milestones.
+
+The [first recipe guide (中文)](docs/recipes/mxfp8-hadamard.zh-CN.md) includes matched BF16 / MXFP8 / MXFP8 + Hadamard configurations, execution scope, known costs, and the GPU validation procedure. These are experimental implementations, not yet validated recommendations.
 
 ## What QoreRL is building
 
@@ -102,7 +104,7 @@ Multiple observation batches improve coverage but do not guarantee an unbiased v
 
 ## Initial scope and roadmap
 
-The first native stack is **Megatron Core / Transformer Engine + vLLM**. The adapters currently target a single-rank, dense Qwen3 BF16 baseline; GPU validation is pending. Native MoE, model-parallel training, low-precision recipes, **SGLang**, and broader model coverage remain later work.
+The first native stack is **Megatron Core / Transformer Engine + vLLM**, targeting single-rank dense Qwen3. BF16 and scoped MXFP8/Hadamard implementations are available for GPU validation. Native MoE, model-parallel training, **SGLang**, and broader model coverage remain later work.
 
 QoreRL will reuse existing training and inference infrastructure. Its initial engineering focus is precision configuration, evidence collection, and recovery across those engines rather than rebuilding their execution or distributed scheduling systems.
 
@@ -113,8 +115,10 @@ QoreRL will reuse existing training and inference infrastructure. Its initial en
 - [x] Verify grouping, loss normalization, optimizer updates, and same-configuration checkpoint/resume locally.
 - [ ] Validate the native BF16 scenario on GPUs, including train-rollout log probabilities and refits.
 - [ ] Establish one native MXFP8 training/rollout baseline and measure quality and cost.
+- [x] Implement experimental MXFP8 MLP down-projection recipes, with optional fixed Hadamard and matching configurations.
+- [x] Record recipe identities and transform state; reject incompatible refits and checkpoint restores.
 - [ ] Package selected research methods as documented options and tested recipes.
-- [ ] Add recipe versioning, compatibility validation, and paired train-rollout checks.
+- [ ] Complete native paired train-rollout checks, including tail errors and post-refit behavior.
 - [ ] Add numerical diagnostics, configurable warning/pause rules, and incident reports.
 - [ ] Implement complete recovery checkpoints and restart after user-selected configuration changes.
 - [ ] Publish reproducible comparisons and recovery examples, including unsuccessful adjustments.

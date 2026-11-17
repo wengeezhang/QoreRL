@@ -17,6 +17,7 @@ QoreRL 的首期价值是：把已有及新出现的量化、量化误差缓解�
 | 训练编排 | `qorerl/runtime/ray_runtime.py` 的 `run_sync_grpo()` | 安排资源，决定什么时候采样、训练、发布权重和保存状态 |
 | Ray worker | `qorerl/runtime/ray_workers.py` 的 `RayLearnerWorker`、`RayRolloutWorker` | 持有 engine，承接远程调用与进程内初始化/关闭 |
 | 后端引擎 | `qorerl/engines/` 的角色接口、工厂、Megatron/vLLM 实现 | 完成模型加载、前后向、参数更新、生成、权重导出与安装 |
+| 精度 recipe | `qorerl/recipes/` 的规格、状态、数学算子和后端适配 | 明确作用域，落实 Fprop/Dgrad/Wgrad 精度，保存变换状态并重建派生缓存 |
 | 算法 | `qorerl/training/objective.py` | 组内优势、策略目标与 loss 聚合语义 |
 | 任务与奖励 | `qorerl/training/tasks.py` | 产生任务输入、按任务规则评分 |
 | 数据协议与批处理 | `contracts.py`、`batching.py` | 前者定义字段和身份/版本/完整性检查；后者构造设备上的 padding、label、mask |
@@ -54,7 +55,7 @@ QoreRL 的首期价值是：把已有及新出现的量化、量化误差缓解�
 
 当前 `weight_version` 表示每个训练 batch 处理后的发布代次，不是权重内容 hash，也不是 optimizer step 数。一个 batch 可以执行多个 optimizer step；全零优势也可以不更新参数但推进发布代次。日志中的 `optimizer_steps` 单独记录真正的更新次数。
 
-`recipe_id` 目前只是受配置白名单约束的固定标识，不代表已有可组合 recipe、动态量化状态或热切换能力。将来的量化状态变化必须纳入执行身份和恢复协议，不能只改一个字符串。
+配置中的 `recipe_id` 是 preset 名称。MXFP8 的实际 `PolicyVersion.recipe_id` 还包含规格 hash，覆盖选层、变换版本、block size 和 seed。checkpoint / 同步快照另带实际 target 形状与固定 signs，并在加载前核对。它们不是通用可组合 recipe 或热切换系统；新增动态量化状态仍必须纳入执行身份和恢复协议。
 
 ## 4. 发布与恢复的边界
 
@@ -70,7 +71,7 @@ checkpoint 的 payload 和 metadata 写完后才通过目录 rename 发布。异
 
 当前只支持同训练语义恢复，修改 recipe、学习率等会被拒绝。未来“暂停 → 用户改配置 → 继续训练”需要显式验证状态兼容性与重建范围，并记录实验延续关系，不通过取消所有配置检查来实现。
 
-当前写出 schema 2 checkpoint，继续读取 schema 1。新字段为 `policy_version.{weight_version,recipe_id}`、`master_parameters`；旧字段仅在读取边界转换。历史记录不改写成新字段。该兼容仅涉及结构改名，不意味着支持任意历史算法或精度方案之间迁移。
+当前写出 schema 2 checkpoint，继续读取 schema 1。版本字段为 `policy_version.{weight_version,recipe_id}`，master 参数为 `master_parameters`；recipe 增加可选 `recipe_state`。旧 BF16/CPU checkpoint 无该字段时仍可恢复；启用变换的 checkpoint 必须有匹配状态。该兼容不意味着支持任意历史算法或精度方案之间迁移。
 
 ## 5. 单 rank 基线与当前限制
 
@@ -90,12 +91,16 @@ recipe 需要描述 Fprop、Dgrad、Wgrad、权重导出和 rollout 各自的数
 
 每项方法先作为明确范围内的实验选项，经过验证后再标记为适用于某类工作负载的 recipe。组合的收益需要重新验证。自动推荐和自动应用均要保留触发证据、改动和后续效果。
 
+第一组实现只作用于 dense Qwen3 的 MLP down projection：直接 MXFP8，或先对输入/权重配套做固定 Hadamard 再 MXFP8。训练使用 TE 原生前后向 GEMM；rollout 使用 vLLM 原生 FlashInfer CUTLASS MXFP8 kernel。仅替换选定实例的执行，不改全局类/量化注册表。数学算子、状态及引擎适配均在 recipes 中；Ray 主循环只记录规格、传递状态并等待安装确认。
+
+canonical Parameter、FP32 master 和 Bridge 导出的权重始终保持原坐标系。训练时旋转的 backward 把梯度映射回来；rollout 的旋转/量化/kernel layout 是可丢弃缓存，refit 后重建，不写回 canonical Parameter。vLLM 在显存 profiling 前安装 recipe，加载或 GPU 同步失败后保持不可服务。当前保留 BF16 与派生缓存、使用未融合的 Hadamard，成本和收益都需实测；详见 [recipe 说明](docs/recipes/mxfp8-hadamard.zh-CN.md)。
+
 ## 7. 已实现、待验证与历史材料
 
-- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume。
-- 本地测试范围：真实 CPU Ray 进程及优化器更新、算法语义、失败时不确认 refit、恢复一致性。adapter mock 测试仅验证调用约定。
-- 待验证：原生 NVIDIA GPU 执行、两端 log-prob 与 refit 数值结果、原生恢复行为。
-- 未实现：原生低精度 recipe、告警暂停控制器、改变 recipe 后恢复、多 rank、异步训练、自动自适应。
+- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe。
+- 本地测试范围：真实 CPU Ray 进程及优化器更新、算法语义、失败时不确认 refit、恢复一致性、Hadamard 等价性与梯度、recipe 身份/状态。native adapter 使用显式 CPU stub 检验调用、padding、参数坐标和失败边界，不冒充 GPU 执行。
+- 待验证：原生 NVIDIA GPU BF16/MXFP8/Hadamard 执行、两端 log-prob 与 refit 数值结果、原生恢复行为、学习收益和成本。
+- 未实现：告警暂停控制器、改变 recipe 后恢复、多 rank、MoE、异步训练、自动自适应。
 
 运行汇总区分 `native_gpu_executed`（执行事实）与 `native_gpu_acceptance`（当前不自动判定验收）。选择 native backend 并结束循环，不代表质量、有效更新或 refit 的验收全部通过。
 
