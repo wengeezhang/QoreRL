@@ -128,6 +128,9 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
             batch = TrainingBatch(trajectories, rewards, advantages, policy_version)
             update_start = time.perf_counter()
             metrics = ray.get(learner.update.remote(ray.put(batch)), timeout=cfg.rpc_timeout)
+            observations = metrics.pop("recipe_observations", [])
+            for observation in observations:
+                append_json(directory / "recipe_metrics.jsonl", observation)
             train_seconds = time.perf_counter() - update_start
             sync_start = time.perf_counter()
             policy_version = publish()

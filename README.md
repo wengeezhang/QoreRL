@@ -1,6 +1,6 @@
 # QoreRL
 
-**Practical low-precision reinforcement learning.**
+<img src="docs/assets/branding/qorerl-lockup.png" alt="QoreRL — Low precision, more control." width="640">
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/qorerl-overview-dark.svg">
@@ -14,6 +14,12 @@ The first milestone focuses on configurable precision recipes, numerical diagnos
 > **Current implementation:** synchronous GRPO coordinated by Ray, with Megatron/vLLM adapters and the first experimental recipes: MXFP8 MLP down projections, with or without fixed Hadamard rotation. Local tests cover training orchestration, transformations, recipe state, refits, and same-configuration recovery. **Native GPU execution, learning quality, and performance remain unvalidated.** Configurable alert-driven pause and recipe-changing recovery are upcoming milestones.
 
 The [first recipe guide (中文)](docs/recipes/mxfp8-hadamard.zh-CN.md) includes matched BF16 / MXFP8 / MXFP8 + Hadamard configurations, execution scope, known costs, and the GPU validation procedure. These are experimental implementations, not yet validated recommendations.
+
+Recipe Insights makes each recipe's costs and numerical effects visible, layer by layer. Opt-in probes compare BF16, MXFP8, and MXFP8 + Hadamard on the same sampled learner inputs and weights. View the accumulating evidence locally, inspect individual layers, and export a report or chart for sharing. [Usage and measurement scope (中文)](docs/recipe-insights.zh-CN.md).
+
+<img src="docs/assets/recipe-insights-demo.png" alt="Recipe Insights interface preview with explicitly synthetic data: paired per-layer operator latency and output error, observed-layer coverage, and sample provenance. Not measured training results." width="1440">
+
+*Interface preview with synthetic data. Native GPU measurements and training benefits remain unvalidated.*
 
 ## What QoreRL is building
 
@@ -117,6 +123,7 @@ QoreRL will reuse existing training and inference infrastructure. Its initial en
 - [ ] Establish one native MXFP8 training/rollout baseline and measure quality and cost.
 - [x] Implement experimental MXFP8 MLP down-projection recipes, with optional fixed Hadamard and matching configurations.
 - [x] Record recipe identities and transform state; reject incompatible refits and checkpoint restores.
+- [x] Implement opt-in paired layer probes, a live local comparison viewer, and standalone report/chart export; GPU measurements pending.
 - [ ] Package selected research methods as documented options and tested recipes.
 - [ ] Complete native paired train-rollout checks, including tail errors and post-refit behavior.
 - [ ] Add numerical diagnostics, configurable warning/pause rules, and incident reports.

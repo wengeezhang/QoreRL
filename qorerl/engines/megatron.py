@@ -70,6 +70,13 @@ class MegatronLearner(SingleRankGRPOLearner):
             self.recipe_installation = install(self.modules[0], cfg.recipe, hf_config.num_hidden_layers)
             self.recipe_state = self.recipe_installation.state
         self.setup_optimizer(cfg, self.modules[0], pad_id, "cuda")
+        if cfg.observation.enabled:
+            from qorerl.observability.probe import RecipeProbe
+
+            self.recipe_probe = RecipeProbe(
+                cfg.observation, cfg.recipe, self.recipe_state.targets, hf_config.num_hidden_layers
+            )
+            self.recipe_installation.observer = self.recipe_probe
 
     def logits(self, input_ids):
         positions = torch.arange(input_ids.shape[1], device=input_ids.device).expand_as(input_ids)
@@ -97,7 +104,15 @@ class MegatronLearner(SingleRankGRPOLearner):
 
     def execution_report(self):
         if self.recipe_installation is not None:
-            return self.recipe_installation.report()
+            report = self.recipe_installation.report()
+            if self.cfg.observation.enabled:
+                report["recipe_observation"] = {
+                    "enabled": True,
+                    "artifact": "recipe_metrics.jsonl",
+                    "phase": "learner.fprop",
+                    "interpretation": "local paired output error against BF16; not training quality",
+                }
+            return report
         return {"identity": self.cfg.policy_recipe_id, "precision": "bf16", "validation": "pending"}
 
     def close(self):

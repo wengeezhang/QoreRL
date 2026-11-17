@@ -17,9 +17,12 @@ class MegatronMXFP8Installation:
     def __init__(self, state, backend):
         self.state, self.backend = state, backend
         self.calls = {name: 0 for name in state.targets}
+        self.observer = None
 
     def forward(self, module, x, name):
         self.calls[name] += 1
+        if self.observer is not None:
+            self.observer.capture(name, x, module.weight)
         x = self.state.rotate(x, name)
         weight = self.state.rotate(module.weight, name)
         # Both rotations are differentiable. Optimizer state never changes basis.

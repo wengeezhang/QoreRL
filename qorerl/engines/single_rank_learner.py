@@ -58,6 +58,14 @@ class SingleRankGRPOLearner:
         last_norm = 0.0
         active = bool(batch.advantages.count_nonzero())
         pre_update = dict(ratio_sum=0.0, abs_log_ratio_sum=0.0, clipped_tokens=0, tokens=0)
+        probe = getattr(self, "recipe_probe", None)
+        observations, probe_seconds = [], 0.0
+        if probe is not None:
+            probe.begin(
+                step=self.policy_version.weight_version + 1,
+                weight_version=self.policy_version.weight_version,
+                optimizer_steps=self.optimizer_steps,
+            )
         for epoch in range(self.cfg.update_epochs):
             self.optimizer.zero_grad(set_to_none=True)
             for start in range(0, count, self.cfg.micro_batch_size):
@@ -81,6 +89,14 @@ class SingleRankGRPOLearner:
                                 master.grad = grad.clone()
                             else:
                                 master.grad.add_(grad)
+                # The zero-advantage path has no backward to free its graph.
+                # Drop its last root before allocating any replay intermediates.
+                del loss
+                if probe is not None and epoch == 0 and start == 0:
+                    # Canonical snapshots were captured before rotation. Replay
+                    # after backward releases training activations first; no
+                    # optimizer update has changed either the weights or version.
+                    observations, probe_seconds = probe.finish()
                 sums["loss"] += stats["loss"] * fraction / self.cfg.update_epochs
                 for key in ("ratio_sum", "abs_log_ratio_sum", "clipped_tokens", "tokens"):
                     sums[key] += stats[key]
@@ -100,7 +116,7 @@ class SingleRankGRPOLearner:
             self.policy_version.weight_version + 1, self.policy_version.recipe_id
         )
         tokens = sums["tokens"]
-        return {
+        metrics = {
             "loss": sums["loss"],
             "ratio_mean": sums["ratio_sum"] / tokens,
             "abs_log_ratio_mean": sums["abs_log_ratio_sum"] / tokens,
@@ -113,6 +129,11 @@ class SingleRankGRPOLearner:
             "skipped_zero_advantage": not active,
             "weight_version": self.policy_version.weight_version,
         }
+        if probe is not None:
+            # Host capture + replay wall time may include queued training work;
+            # this is not an isolated measurement of instrumentation overhead.
+            metrics.update(recipe_observations=observations, recipe_probe_seconds=probe_seconds)
+        return metrics
 
     def checkpoint(self):
         stream = io.BytesIO()

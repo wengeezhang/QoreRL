@@ -5,6 +5,7 @@ import math
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from qorerl.observability.config import RecipeObservationConfig
 from qorerl.recipes.spec import resolve_recipe
 
 
@@ -31,6 +32,7 @@ class TrainConfig:
     rpc_timeout: float = 600.0
     recipe_id: str = "bf16-baseline-v1"
     recipe_options: dict = field(default_factory=dict)
+    recipe_observation: dict = field(default_factory=dict)
     learner_runtime_env: dict = field(default_factory=dict)
     rollout_runtime_env: dict = field(default_factory=dict)
 
@@ -46,6 +48,10 @@ class TrainConfig:
     def policy_recipe_id(self):
         return self.recipe.identity
 
+    @property
+    def observation(self):
+        return RecipeObservationConfig.from_dict(self.recipe_observation)
+
     def __post_init__(self):
         pair = (self.learner_backend, self.rollout_backend)
         if pair not in {("megatron", "vllm"), ("torch_test", "torch_test")}:
@@ -55,6 +61,9 @@ class TrainConfig:
             raise ValueError("CPU test engines only support fp32-test-v1; no native quantization fallback")
         if not self.is_cpu_test and recipe.name == "fp32-test-v1":
             raise ValueError("fp32-test-v1 requires the explicit CPU test engines")
+        observation = self.observation
+        if observation.enabled and (self.is_cpu_test or not recipe.is_mxfp8):
+            raise ValueError("recipe_observation requires a native Megatron MXFP8 recipe; no CPU fallback")
         for name in (
             "steps",
             "prompts_per_step",

@@ -142,3 +142,9 @@ vLLM 的推理 profiling 能看见已安装的持久缓存，但未必覆盖 ref
 若验证有数值/学习收益，再优化 FWHT kernel、权重缓存生命周期、同步成本，并扩展模型/作用域。不能先增加 MoE、模型并行或自动修复再把所有差异混在一起评估。
 
 方法来源：[QuaRot](https://arxiv.org/abs/2404.00456) 提供正交旋转的参考，但本 recipe 不是 QuaRot 全模型 PTQ 复现，也没有将其推理实验外推为 RL 训练保证。执行依据为 [TE 的 GEMM 接口](https://github.com/NVIDIA/TransformerEngine/blob/15288857644368b8b7bdddd9bead7d6d3d04de80/transformer_engine/pytorch/cpp_extensions/gemm.py)、[TE Linear 的前后向](https://github.com/NVIDIA/TransformerEngine/blob/15288857644368b8b7bdddd9bead7d6d3d04de80/transformer_engine/pytorch/module/linear.py) 及 [vLLM 0.32 的 FlashInfer MXFP8 kernel](https://github.com/vllm-project/vllm/blob/v0.32.0/vllm/model_executor/kernels/linear/mxfp8/flashinfer.py)。
+
+## 7. 查看训练内的局部配对观测
+
+可显式启用 [Recipe Insights](../recipe-insights.zh-CN.md)：默认每 20 步轮转观测两层，截取实际输入和 canonical 权重，比较 BF16、MXFP8、MXFP8 + Hadamard 的局部前向误差及 CUDA event 耗时。它不校准、不切换 recipe，也不测完整训练质量；原生 GPU 验证仍待完成。配置、实时页面和 HTML 导出命令见该指南。
+
+![Recipe Insights 合成数据预览，非 GPU 实测](../assets/recipe-insights-demo.png)

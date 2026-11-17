@@ -18,6 +18,7 @@ QoreRL 的首期价值是：把已有及新出现的量化、量化误差缓解�
 | Ray worker | `qorerl/runtime/ray_workers.py` 的 `RayLearnerWorker`、`RayRolloutWorker` | 持有 engine，承接远程调用与进程内初始化/关闭 |
 | 后端引擎 | `qorerl/engines/` 的角色接口、工厂、Megatron/vLLM 实现 | 完成模型加载、前后向、参数更新、生成、权重导出与安装 |
 | 精度 recipe | `qorerl/recipes/` 的规格、状态、数学算子和后端适配 | 明确作用域，落实 Fprop/Dgrad/Wgrad 精度，保存变换状态并重建派生缓存 |
+| recipe 观测 | `qorerl/observability/` 的配置、局部重放和页面 | 有预算地采集真实操作数，记录配对数值/耗时证据；不修改训练方案或作质量判定 |
 | 算法 | `qorerl/training/objective.py` | 组内优势、策略目标与 loss 聚合语义 |
 | 任务与奖励 | `qorerl/training/tasks.py` | 产生任务输入、按任务规则评分 |
 | 数据协议与批处理 | `contracts.py`、`batching.py` | 前者定义字段和身份/版本/完整性检查；后者构造设备上的 padding、label、mask |
@@ -71,6 +72,8 @@ checkpoint 的 payload 和 metadata 写完后才通过目录 rename 发布。异
 
 当前只支持同训练语义恢复，修改 recipe、学习率等会被拒绝。未来“暂停 → 用户改配置 → 继续训练”需要显式验证状态兼容性与重建范围，并记录实验延续关系，不通过取消所有配置检查来实现。
 
+`recipe_observation` 属于诊断配置，可在恢复时修改，不改变 recipe 身份或训练状态。观测窗口由已恢复的发布进度推导，不向模型 checkpoint 增加计数器或操作数副本。
+
 当前写出 schema 2 checkpoint，继续读取 schema 1。版本字段为 `policy_version.{weight_version,recipe_id}`，master 参数为 `master_parameters`；recipe 增加可选 `recipe_state`。旧 BF16/CPU checkpoint 无该字段时仍可恢复；启用变换的 checkpoint 必须有匹配状态。该兼容不意味着支持任意历史算法或精度方案之间迁移。
 
 ## 5. 单 rank 基线与当前限制
@@ -95,9 +98,17 @@ recipe 需要描述 Fprop、Dgrad、Wgrad、权重导出和 rollout 各自的数
 
 canonical Parameter、FP32 master 和 Bridge 导出的权重始终保持原坐标系。训练时旋转的 backward 把梯度映射回来；rollout 的旋转/量化/kernel layout 是可丢弃缓存，refit 后重建，不写回 canonical Parameter。vLLM 在显存 profiling 前安装 recipe，加载或 GPU 同步失败后保持不可服务。当前保留 BF16 与派生缓存、使用未融合的 Hadamard，成本和收益都需实测；详见 [recipe 说明](docs/recipes/mxfp8-hadamard.zh-CN.md)。
 
-## 7. 已实现、待验证与历史材料
+## 7. 观测证据的边界
 
-- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe。
+当前 [Recipe Insights](docs/recipe-insights.zh-CN.md) 默认关闭；启用后，每 20 步从已安装目标层中轮转选择最多两层，截取首个 epoch、首个 microbatch 的输入前缀和更新前 canonical 权重。图释放后在副本上重放 BF16、MXFP8、MXFP8 + Hadamard，不干预训练输出、梯度、optimizer 或 recipe 状态。编排只将记录写入 `recipe_metrics.jsonl`，页面读取证据，不参与训练控制。
+
+参考值是同一 X、W 的 BF16 `F.linear`，不是全模型 BF16 反事实。CUDA event 计时包含局部调用的变换、量化、padding 和 GEMM，不表示 FLOPs 或端到端加速；`probe_seconds` 是主机捕获加重放墙钟时间，可能含排队训练工作，不能当成隔离后的观测开销。副本字节预算不约束变换临时空间或 workspace。错误、跳过和未观测层保留显式状态，演示数据与实测数据区分来源。
+
+后续 Dgrad/Wgrad、梯度方向、同 token 的训推 log-prob、端到端质量与成本需要分别定义采样、参考和预算，不能从当前前向图表推断。它们先提供可核对证据，是否触发暂停或调整仍由后续明确的控制流程决定。
+
+## 8. 已实现、待验证与历史材料
+
+- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe，以及可选局部前向观测和报告页面。
 - 本地测试范围：真实 CPU Ray 进程及优化器更新、算法语义、失败时不确认 refit、恢复一致性、Hadamard 等价性与梯度、recipe 身份/状态。native adapter 使用显式 CPU stub 检验调用、padding、参数坐标和失败边界，不冒充 GPU 执行。
 - 待验证：原生 NVIDIA GPU BF16/MXFP8/Hadamard 执行、两端 log-prob 与 refit 数值结果、原生恢复行为、学习收益和成本。
 - 未实现：告警暂停控制器、改变 recipe 后恢复、多 rank、MoE、异步训练、自动自适应。

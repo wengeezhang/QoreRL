@@ -43,7 +43,14 @@ def resume_metadata(path, cfg):
     if schema not in (1, 2):
         raise ValueError("Unsupported checkpoint schema")
     previous = TrainConfig(**metadata["config"])
-    allowed = {"steps", "checkpoint_every", "rpc_timeout", "learner_runtime_env", "rollout_runtime_env"}
+    allowed = {
+        "steps",
+        "checkpoint_every",
+        "rpc_timeout",
+        "learner_runtime_env",
+        "rollout_runtime_env",
+        "recipe_observation",  # Diagnostics neither change the recipe nor its learned state.
+    }
     changed = [k for k, v in cfg.to_dict().items() if k not in allowed and previous.to_dict()[k] != v]
     if changed:
         raise ValueError(f"Resume currently requires identical training semantics; changed: {changed}")
