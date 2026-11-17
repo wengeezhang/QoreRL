@@ -1,0 +1,15 @@
+{
+  "learner_backend": "torch_test",
+  "rollout_backend": "torch_test",
+  "model": "qorerl-cpu-copy-fixture",
+  "steps": 40,
+  "prompts_per_step": 8,
+  "group_size": 8,
+  "micro_batch_size": 16,
+  "learning_rate": 0.003,
+  "max_new_tokens": 1,
+  "max_model_len": 16,
+  "rollout_workers": 2,
+  "checkpoint_every": 20,
+  "recipe_id": "fp32-test-v1"
+}

@@ -1,0 +1,27 @@
+{
+  "status": "completed",
+  "backend": "torch_test/torch_test",
+  "first_step": 0,
+  "last_step": 40,
+  "final_metrics": {
+    "loss": 8.381903171539307e-09,
+    "ratio_mean": 0.9999999850988388,
+    "abs_log_ratio_mean": 7.35744833946228e-08,
+    "clip_fraction": 0.0,
+    "gradient_norm": 0.6349833011627197,
+    "optimizer_steps": 40,
+    "skipped_zero_advantage": false,
+    "policy_version": 40,
+    "step": 40,
+    "reward_mean": 0.25,
+    "nonzero_advantage_fraction": 0.625,
+    "response_length_mean": 1.0,
+    "truncated_fraction": 1.0,
+    "rollout_seconds": 0.0021526250056922436,
+    "train_seconds": 0.003316666930913925,
+    "sync_seconds": 0.001393625047057867
+  },
+  "checkpoint": "/Users/bytedance/projects/QoreRL/results/ray-grpo-local-v1/checkpoints/step-000040",
+  "seconds": 45.13382316706702,
+  "native_gpu_validated_by_this_run": false
+}

@@ -1,4 +1,4 @@
-"""Run: uv run qorerl --steps 60 --seeds 0,1,2 --out results/first-study"""
+"""Run: uv run qorerl research --steps 60 --seeds 0,1,2 --out results/first-study"""
 
 import argparse
 import copy

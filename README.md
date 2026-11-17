@@ -6,7 +6,43 @@ QoreRL is an early-stage, quantization-native reinforcement learning framework b
 
 The first milestone focuses on configurable precision recipes, numerical diagnostics, and a guided recovery workflow: observe a run, preserve recoverable state when problems arise, present evidence and supported options, and let the user adjust the configuration before resuming. Automatic precision adaptation remains an ongoing research goal, not a prerequisite for a useful first release.
 
-> **Available today:** a runnable, single-process tiny-MoE research prototype with paired BF16 gradient probes and an experimental Wgrad intervention. MXFP8 is numerically emulated, **not executed on native Tensor Cores**. Native engine integrations, the recipe catalog, alert-driven pause, and configurable checkpoint recovery are planned. The current CLI saves experiment checkpoints but does not implement resume.
+> **Current implementation:** synchronous GRPO coordinated by Ray, with a Megatron learner and vLLM rollout adapter. The shared training loop, weight publication, and checkpoint/resume are tested locally using explicit CPU test engines. **Megatron + vLLM execution still needs GPU validation.** Low-precision recipes, configurable alert-driven pause, and recipe-changing recovery are the next milestones. The earlier tiny-MoE numerical experiment is retained separately under [Research](#research).
+
+## Start with the training foundation
+
+The first native scenario is **Qwen3-0.6B arithmetic GRPO**, using unquantized BF16 execution before introducing low-precision recipes. Ray places one Megatron learner and one vLLM rollout worker on separate GPUs. Each step collects complete response groups, computes verifiable rewards and group-relative advantages, updates the policy, and publishes the next weight version.
+
+```text
+Megatron learner ── versioned weights ──► vLLM rollout workers
+       ▲                                      │
+       │          Ray coordinator             │
+       └── GRPO batch ◄── reward / grouping ◄──┘
+
+Publish + acknowledge → sample → update → publish + acknowledge → checkpoint
+```
+
+On a compatible NVIDIA GPU environment, with Megatron Bridge/Core, Transformer Engine, and vLLM installed:
+
+```bash
+uv pip install -e .
+qorerl train --config configs/grpo_megatron_vllm.json --out results/native-first-run
+```
+
+The default native configuration requires **two GPUs** and uses a single training rank and TP=1 rollout. Native dependencies are deliberately not installed by the CPU quickstart. See [the execution and environment guide (中文)](docs/ray-grpo.zh-CN.md) for API targets, limitations, checkpoint/resume, and the GPU validation procedure.
+
+To exercise the same Ray coordinator and GRPO implementation **locally without GPUs**:
+
+```bash
+uv sync --group dev
+uv run qorerl train --config configs/grpo_cpu_test.json --out results/ray-local
+uv run pytest -q
+```
+
+This explicit `torch_test` backend uses a small recurrent model and a digit-copy task. It performs real sampling and optimizer updates in separate Ray processes; it does **not** emulate or validate Megatron/vLLM kernels. It is not selected automatically if a GPU dependency is missing.
+
+See the [recorded 40-step local run](docs/experiments/2026-11-17-ray-grpo/README.md) for configuration, metrics, and validation boundaries.
+
+Runs save resolved configuration, worker identities, trajectories with behavior log probabilities and policy versions, per-step metrics, and model/optimizer/RNG checkpoints. Resume currently accepts the same training semantics, with a larger total step count. An invalid batch or failed update/refit stops the run and writes an incident report pointing to the last completed recovery checkpoint.
 
 ## What QoreRL is building
 
@@ -82,54 +118,6 @@ Matching training and rollout configuration does not guarantee matching numerics
 
 Changing a recipe affects future execution; it does not undo previous optimizer updates. Restoring an earlier checkpoint is a separate recovery action. A restart under a different recipe is a new continuation of the experiment, not a promise of identical training behavior.
 
-## Run the current research prototype
-
-```bash
-uv sync --group dev
-uv run pytest -q
-uv run qorerl --steps 60 --seeds 0,1,2 --out results/first-study
-```
-
-Python 3.12+ and a CPU are sufficient. This command runs three arms from a shared tiny-MoE warm-start checkpoint: BF16, fixed MXFP8 emulation, and adaptive Wgrad activation precision. Calibration occurs before updates 20, 40, and 60, on the same frozen weights and recorded trajectories. Probe runs do not advance the live optimizer. Output directories must be new.
-
-```text
-MXFP8 forward remains unchanged
-                  |
-Every 20 updates: compare each Linear's weight gradient with full BF16 reference
-                  |
-Negative gradient cosine, with non-negligible norms?
-                  |
-Use saved pre-quantization BF16 activation ONLY in that Linear's Wgrad
-                  |
-Keep Dgrad and G's existing numerical values; measure the intervention's outcome
-```
-
-The saved activation comes from the **current low-precision forward**, not the all-BF16 reference run. Restored modules remain active in subsequent updates. This research arm applies the proposed rule and reports results even when a candidate fails to improve alignment or loss; it is not the planned user-approved recovery workflow.
-
-- [Detailed experiment protocol (中文)](docs/wgrad-experiment.zh-CN.md)
-- [First CPU experiment results (中文)](docs/experiments/2026-11-08/README.md)
-- [Linear precision semantics](qorerl/precision.py)
-- [Paired calibration and private trial updates](qorerl/calibration.py)
-- [Tiny MoE and GRPO experiment runner](qorerl/experiment.py)
-
-Results include `report.md`, per-step JSONL, per-layer calibration JSONL, and model/optimizer checkpoints. Reported runtime is emulator runtime, not an MXFP8 acceleration benchmark.
-
-## First research question
-
-> When a module's MXFP8 weight gradient points against its BF16 reference, does restoring only the Wgrad activation operand improve alignment, local updates, and ultimately RL learning?
-
-The implemented study compares:
-
-| Experiment | Question |
-| --- | --- |
-| BF16 reference training | How does the higher-precision baseline learn? |
-| Fixed MXFP8 emulation | What changes when linear Fprop, Dgrad and Wgrad operands are quantized? |
-| Periodic gradient-triggered intervention | What happens when only selected Wgrad activations retain BF16 values? |
-
-It records gradient alignment separately from policy loss and reward. A direction recovery is not assumed to guarantee better training. It also verifies that the intervention leaves forward logits and unselected parameter gradients unchanged.
-
-Selective channel scaling, rotations, refresh schedules, and other repairs remain follow-up research directions. This first prototype does not implement them.
-
 ## Evaluation principles
 
 - **Measure more than tensor error.** Include operator outputs, gradient behavior, and end-to-end training quality.
@@ -145,18 +133,16 @@ Multiple observation batches improve coverage but do not guarantee an unbiased v
 
 ## Initial scope and roadmap
 
-The prototype uses standalone PyTorch and a tiny MoE. The first native integration target is one pinned **Megatron Core / Transformer Engine + vLLM** stack, with a small set of reproducible recipes. **SGLang** and broader model/backend coverage are later targets. These are plans, not current compatibility claims.
+The first native stack is **Megatron Core / Transformer Engine + vLLM**. The adapters currently target a single-rank, dense Qwen3 BF16 baseline; GPU validation is pending. Native MoE, model-parallel training, low-precision recipes, **SGLang**, and broader model coverage remain later work.
 
 QoreRL will reuse existing training and inference infrastructure. Its initial engineering focus is precision configuration, evidence collection, and recovery across those engines rather than rebuilding their execution or distributed scheduling systems.
 
-### Available research foundation
-
-- [x] Build a standalone tiny-MoE group-relative RL experiment with paired gradient probes.
-- [x] Implement Wgrad-only BF16 activation restoration and verify Fprop/Dgrad isolation.
-- [x] Record private AdamW trial updates, training rewards, and reproducible experiment artifacts.
-
 ### First milestone: usable, observable, recoverable training
 
+- [x] Implement a Ray GRPO loop with versioned trajectories and acknowledged weight publication.
+- [x] Implement Megatron/vLLM adapters and explicit CPU integration engines.
+- [x] Verify grouping, loss normalization, optimizer updates, and same-configuration checkpoint/resume locally.
+- [ ] Validate the native BF16 scenario on GPUs, including train-rollout log probabilities and refits.
 - [ ] Establish one native MXFP8 training/rollout baseline and measure quality and cost.
 - [ ] Package selected research methods as documented options and tested recipes.
 - [ ] Add recipe versioning, compatibility validation, and paired train-rollout checks.
@@ -173,6 +159,16 @@ QoreRL will reuse existing training and inference infrastructure. Its initial en
 - [ ] Automate bounded, validated adjustments with post-change monitoring and recovery.
 
 Research continues alongside the first milestone. A general automatic-repair solution is not a release requirement.
+
+## Research
+
+The earlier tiny-MoE experiment asks whether periodically comparing gradients with BF16 and restoring selected Wgrad activation operands helps learning. It is a separate hypothesis test, **not the framework's default training strategy**. MXFP8 is numerically emulated with FP32 GEMMs, so its runtime does not measure native acceleration.
+
+- [Experiment semantics and commands (中文)](docs/wgrad-experiment.zh-CN.md)
+- [Recorded CPU results (中文)](docs/experiments/2026-11-08/README.md)
+- [Numerical implementation](qorerl/precision.py) and [calibration](qorerl/calibration.py)
+
+Its CLI is now `uv run qorerl research ...` (or `uv run qorerl-research ...`). Existing experiment artifacts remain unchanged.
 
 ## Development
 

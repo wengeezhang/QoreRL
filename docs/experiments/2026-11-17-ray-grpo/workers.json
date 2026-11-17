@@ -1,0 +1,20 @@
+{
+  "driver_pid": 76854,
+  "workers": [
+    {
+      "role": "learner",
+      "pid": 77026,
+      "node": "dc721dfa57ae9b3c1279e3d4781868617e1a402f290a8a1a6791ad8e"
+    },
+    {
+      "role": "rollout",
+      "pid": 77027,
+      "node": "dc721dfa57ae9b3c1279e3d4781868617e1a402f290a8a1a6791ad8e"
+    },
+    {
+      "role": "rollout",
+      "pid": 77025,
+      "node": "dc721dfa57ae9b3c1279e3d4781868617e1a402f290a8a1a6791ad8e"
+    }
+  ]
+}

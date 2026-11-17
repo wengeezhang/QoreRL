@@ -9,7 +9,7 @@
 ## 第一轮：40 步 SFT warmup，60 步 RL
 
 ```bash
-uv run qorerl --steps 60 --warmup-steps 40 --seeds 0,1,2 \
+uv run qorerl research --steps 60 --warmup-steps 40 --seeds 0,1,2 \
   --out results/wgrad-cpu-20261108
 ```
 
@@ -36,7 +36,7 @@ uv run qorerl --steps 60 --warmup-steps 40 --seeds 0,1,2 \
 为观察实际学习，从较少 warmup 的同一类 checkpoint 起跑，没有更换模型或修改阈值：
 
 ```bash
-uv run qorerl --steps 100 --warmup-steps 5 --seeds 0,1,2 \
+uv run qorerl research --steps 100 --warmup-steps 5 --seeds 0,1,2 \
   --out results/wgrad-learning-20261108
 ```
 

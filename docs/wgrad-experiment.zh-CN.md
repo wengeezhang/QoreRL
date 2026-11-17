@@ -1,4 +1,6 @@
-# QoreRL 第一版：每 20 步校准，只恢复 Wgrad 的 BF16 激活
+# 独立研究实验：每 20 步校准，只恢复 Wgrad 的 BF16 激活
+
+这是早期的数值研究原型，不是 QoreRL 的默认训练策略。框架当前的工程主线是 Ray + Megatron + vLLM 的 GRPO 基础，再接入可选择的量化 recipe、诊断和人工调整恢复能力。工程主线见 [Ray GRPO 执行说明](ray-grpo.zh-CN.md)。
 
 本实验实现讨论中的方案，不以理论上的“有益无害”为前提。触发后实际应用干预，并如实记录改善、无变化或恶化。
 
@@ -107,10 +109,10 @@ uv sync --group dev
 uv run pytest -q
 
 # 三个随机种子、三个实验组；校准发生在 RL step 20/40/60。
-uv run qorerl --steps 60 --seeds 0,1,2 --out results/my-first-study
+uv run qorerl research --steps 60 --seeds 0,1,2 --out results/my-first-study
 
 # 快速检查接口；这不是默认 20 步周期的正式对照。
-uv run qorerl --steps 2 --warmup-steps 1 --calibration-interval 2 \
+uv run qorerl research --steps 2 --warmup-steps 1 --calibration-interval 2 \
   --prompts 2 --group-size 4 --arms adaptive --out results/my-smoke-test
 ```
 
@@ -133,7 +135,7 @@ results/my-first-study/
       final.pt            模型、optimizer、override 名单、配置与 RNG 状态
 ```
 
-当前 CLI 没有自动 resume 命令；checkpoint 是实验复查和后续开发的材料。
+这个研究实验的 CLI 没有 resume 命令；checkpoint 是实验复查材料。独立的 `qorerl train` 工程主线支持同配置续训，两者的 checkpoint 格式不同，不能混用。
 
 ## 如何读结论
 

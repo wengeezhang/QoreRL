@@ -1,1 +1,1 @@
-"""QoreRL's single-process numerical research prototype."""
+"""QoreRL: Ray training infrastructure and independent precision research."""
