@@ -181,8 +181,9 @@ def native_mxfp8_linear(input, weight, bias=None):
     must be BF16 on the same supported CUDA device. Bias, when present, is
     added in BF16 outside the GEMM and uses ordinary PyTorch autograd.
 
-    Apply any fixed orthogonal transform to input and weight *before* calling
-    this function. Autograd then maps its gradients back to canonical weights.
+    Pass effective operands after the recipe's Hadamard rotation or SmoothQuant
+    input/weight scaling. Autograd maps both returned gradients through those
+    transforms to canonical activations and trainable parameters.
     No quantized weight cache or new trainable parameter is created.
     """
     if input.ndim < 2 or weight.ndim != 2 or input.shape[-1] != weight.shape[1]:

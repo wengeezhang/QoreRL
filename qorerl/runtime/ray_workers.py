@@ -28,6 +28,18 @@ class RayLearnerWorker:
     def update(self, batch):
         return self.engine.update(batch)
 
+    def current_policy(self):
+        return self.engine.policy_version
+
+    def completed_updates(self):
+        return self.engine.optimizer_steps
+
+    def prepare_calibration(self, batch):
+        return self.engine.prepare_calibration(batch)
+
+    def apply_calibration(self, scales):
+        return self.engine.apply_calibration(scales)
+
     def export_weights(self):
         return self.engine.export_weights()
 

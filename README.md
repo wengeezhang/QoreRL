@@ -11,7 +11,7 @@ QoreRL is an early-stage, quantization-native reinforcement learning framework b
 
 The first milestone focuses on configurable precision recipes, numerical diagnostics, and a guided recovery workflow: observe a run, preserve recoverable state when problems arise, present evidence and supported options, and let the user adjust the configuration before resuming. Automatic precision adaptation remains an ongoing research goal, not a prerequisite for a useful first release.
 
-> **Current implementation:** synchronous GRPO coordinated by Ray, with Megatron/vLLM adapters and the first experimental recipes: MXFP8 MLP down projections, with or without fixed Hadamard rotation. Local tests cover training orchestration, transformations, recipe state, refits, and same-configuration recovery. **Native GPU execution, learning quality, and performance remain unvalidated.** Configurable alert-driven pause and recipe-changing recovery are upcoming milestones.
+> **Current implementation.** Synchronous GRPO on Ray supports scoped MXFP8, fixed Hadamard, and experimental dynamic SmoothQuant. Users can discover outliers, calibrate known layers, or supply existing scales. The trainer can pause with measured evidence, then resume after the user accepts or rejects a specific change. Local tests exercise this workflow. Native GPU execution, training quality, and cost still await validation.
 
 The [first recipe guide (中文)](docs/recipes/mxfp8-hadamard.zh-CN.md) includes matched BF16 / MXFP8 / MXFP8 + Hadamard configurations, execution scope, known costs, and the GPU validation procedure. These are experimental implementations, not yet validated recommendations.
 
@@ -23,14 +23,14 @@ Recipe Insights makes each recipe's costs and numerical effects visible, layer b
 
 ## Recipe catalog and roadmap
 
-This catalog tracks quantization methods, error-mitigation techniques, and RL corrections available or planned for QoreRL recipes, along with research candidates. Status refers to **QoreRL integration**, not the maturity of the original paper. Last reviewed: **2026-11-17**.
+This catalog tracks quantization methods, error-mitigation techniques, and RL corrections available or planned for QoreRL recipes, along with research candidates. Status refers to **QoreRL integration**, not the maturity of the original paper. Last reviewed: **2026-11-18**.
 
 - **Code ready · GPU unvalidated:** implementation and local tests are complete; native GPU execution, learning quality, and performance have not been validated.
 - **GPU validated:** native execution and results have been verified for a documented workload. No recipe has reached this status yet.
 - **Planned:** selected for implementation, but not available yet.
 - **Research:** a candidate to evaluate before committing to an implementation.
 
-**Current focus:** validate the existing BF16 / MXFP8 / fixed-Hadamard paths on GPUs and publish paired measurements through Recipe Insights. GPU runs are pending; the research entries below are not active implementations.
+**Current focus.** Validate the native recipes on GPUs and compare numerical effects, reward, and total training cost against matched baselines.
 
 | Recipe / technique | Status | What it is intended to improve | Scope and source |
 | --- | --- | --- | --- |
@@ -38,7 +38,7 @@ This catalog tracks quantization methods, error-mitigation techniques, and RL co
 | **Scoped MXFP8** | Code ready · GPU unvalidated | Run selected MLP down projections in native MXFP8 during training and rollout. | Other operators retain the BF16 baseline. [Recipe guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
 | **Fixed Hadamard + MXFP8** | Code ready · GPU unvalidated | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
 | **Learnable rotations / Hadamard-based transforms** | Planned | Optimize the rotation rather than relying on one fixed transform. | [SpinQuant](https://arxiv.org/abs/2405.16406) learns orthogonal rotations; [HARP](https://arxiv.org/abs/2605.29843) uses structured, Hadamard-initialized transforms. Both need adaptation from post-training quantization to RL; a standard Hadamard matrix itself is fixed. |
-| **Dynamic SmoothQuant** | Planned | Refresh selected channel scales as activation statistics change during RL. | A QoreRL research extension of [SmoothQuant](https://arxiv.org/abs/2211.10438), whose original method uses offline calibration for deployment. Update frequency, state synchronization, and training benefit require validation. |
+| **Dynamic SmoothQuant** | Code ready · GPU unvalidated | Compare new channel scales against currently active scales, then apply selected changes to training and rollout. | Scoped MLP down projections. Supports periodic calibration, checkpointed review, and importing external scales. [Run the workflow (中文)](docs/recipes/dynamic-smoothquant.zh-CN.md) · [Original SmoothQuant](https://arxiv.org/abs/2211.10438). |
 | **Calibrated Clipping** | Planned | Adjust PPO clipping bounds so FP8 ratio distortion does not excessively suppress useful updates. | [UW–Madison / ByteDance Seed](https://arxiv.org/abs/2609.22870): two BF16 forward-only shadow passes, for current and old policies, every 20 steps in the paper. This calibrates clipping, not gradients or a BF16 optimizer step. |
 | **TRIAGE: mismatch-aware RL correction** | Research | Reweight trajectory segments using advantage and train–rollout log-probability gaps, with bounded correction for mismatch-amplifying updates. | [TRIAGE](https://arxiv.org/abs/2610.07043) targets native NVFP4 W4A4 learners and samplers. Requires behavior log-probabilities and loss integration; does not certify the true gradient direction. |
 | **FourSight: trajectory filtering** | Research | Filter trajectories with too many or consecutive tokens assigned very low probability by the learner. | The data-selection component of [FourSight](https://arxiv.org/abs/2611.04887), studied in FP4 RL. Evaluate retained data, sampling cost, and learning quality together. |
@@ -111,23 +111,11 @@ Developers need answers to practical questions:
 
 QoreRL aims to make this process reproducible and manageable while building evidence for increasingly automated decisions.
 
-## First-milestone workflow (planned)
+## Using the calibration workflow
 
-```text
-Choose a supported recipe and validate the configuration
-                  |
-Train and collect numerical / learning diagnostics
-                  |
-On a configured pause condition: preserve evidence and stop safely
-                  |
-Review symptoms, possible causes, and supported adjustment options
-                  |
-User edits the configuration
-                  |
-Validate compatibility and restart from a recovery checkpoint
-                  |
-Continue training and measure the adjustment's actual outcome
-```
+Start with the information you already have. QoreRL can discover candidate layers from a training batch, evaluate fresh scales for layers you specify, or install a previously calibrated scale file before the first rollout. Each trajectory records the weight and scale version used to generate it.
+
+For a periodic change, the trainer records the active and candidate errors on held-out activation rows. In manual mode it saves the proposal with a recovery checkpoint and exits. Accept it to synchronize the selected scales across the learner and rollout replicas, or reject it to continue with the existing scales. Automatic approval uses the same evidence, checkpoint, and publication path. [CPU walkthrough and native configuration](docs/recipes/dynamic-smoothquant.zh-CN.md).
 
 Matching training and rollout configuration does not guarantee matching numerics. Recipes must be checked using actual engine execution, including relevant batching and prefill/decode behavior. Trajectories must retain the weight and recipe versions that produced them.
 
@@ -148,7 +136,7 @@ Multiple observation batches improve coverage but do not guarantee an unbiased v
 
 ## Initial scope and roadmap
 
-The first native stack is **Megatron Core / Transformer Engine + vLLM**, targeting single-rank dense Qwen3. BF16 and scoped MXFP8/Hadamard implementations are available for GPU validation. Native MoE, model-parallel training, **SGLang**, and broader model coverage remain later work.
+The first native stack is **Megatron Core / Transformer Engine + vLLM**, targeting single-rank dense Qwen3. BF16 and scoped MXFP8, Hadamard, and SmoothQuant implementations are available for GPU validation. Native MoE, model-parallel training, **SGLang**, and broader model coverage remain later work.
 
 QoreRL will reuse existing training and inference infrastructure. Its initial engineering focus is precision configuration, evidence collection, and recovery across those engines rather than rebuilding their execution or distributed scheduling systems.
 
@@ -165,7 +153,8 @@ QoreRL will reuse existing training and inference infrastructure. Its initial en
 - [ ] Package selected research methods as documented options and tested recipes.
 - [ ] Complete native paired train-rollout checks, including tail errors and post-refit behavior.
 - [ ] Add numerical diagnostics, configurable warning/pause rules, and incident reports.
-- [ ] Implement complete recovery checkpoints and restart after user-selected configuration changes.
+- [x] Resume after accepting or rejecting a scoped SmoothQuant proposal.
+- [ ] Extend compatible changes and recovery to additional recipes.
 - [ ] Publish reproducible comparisons and recovery examples, including unsuccessful adjustments.
 
 ### Ongoing research and later automation

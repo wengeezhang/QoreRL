@@ -9,11 +9,14 @@ from qorerl.training.contracts import Trajectory
 class WeightLoaderExtension:
     """Runs inside vLLM's worker, where the executable model actually lives."""
 
-    def qorerl_load_weights(self, tensors, recipe_state=None):
+    def qorerl_load_weights(self, tensors, recipe_state=None, expected_recipe_id=None):
         model = self.model_runner.model
         installation = getattr(self, "qorerl_recipe_installation", None)
         if installation is not None:
-            installation.state.validate(recipe_state)
+            incoming_identity = installation.state.validate(recipe_state)
+            if expected_recipe_id is not None or installation.state.spec.uses_smoothquant:
+                if expected_recipe_id != incoming_identity:
+                    raise ValueError("Published policy identity disagrees with the worker's recipe state")
             installation.state.validate_weights(tensors)
             installation.invalidate()
         elif recipe_state is not None:
@@ -29,6 +32,8 @@ class WeightLoaderExtension:
             if missing:
                 raise RuntimeError(f"Incomplete vLLM refit: {sorted(missing)}")
             if installation is not None:
+                if installation.state.spec.uses_smoothquant:
+                    installation.state.install_scales(recipe_state["scales"])
                 installation.refresh()
             torch.cuda.synchronize()
         except BaseException:
@@ -37,6 +42,8 @@ class WeightLoaderExtension:
             if installation is not None:
                 installation.invalidate()
             raise
+        if installation is not None and installation.state.spec.uses_smoothquant:
+            return installation.state.active_identity
         return len(loaded)
 
     def qorerl_execution_report(self):
@@ -80,17 +87,19 @@ class VLLMRollout:
         # generate() is blocking; no in-flight requests exist at publication.
         # Prefix caching and CUDA graphs are disabled in this initial refit path.
         self.policy_version = None
-        self.llm.collective_rpc(
+        acknowledgements = self.llm.collective_rpc(
             "qorerl_load_weights",
-            args=(snapshot.tensors, snapshot.recipe_state),
+            args=(snapshot.tensors, snapshot.recipe_state, snapshot.policy_version.recipe_id),
             timeout=self.cfg.rpc_timeout,
         )
+        if self.cfg.recipe.uses_smoothquant and acknowledgements != [snapshot.policy_version.recipe_id]:
+            raise RuntimeError("vLLM worker failed to acknowledge the active SmoothQuant scale identity")
         self.policy_version = snapshot.policy_version
         return self.policy_version
 
     def execution_report(self):
         return {
-            "identity": self.cfg.policy_recipe_id,
+            "identity": self.policy_version.recipe_id if self.policy_version is not None else None,
             "workers": self.llm.collective_rpc("qorerl_execution_report", timeout=self.cfg.rpc_timeout),
         }
 

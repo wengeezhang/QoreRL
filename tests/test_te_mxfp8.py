@@ -15,6 +15,8 @@ import torch
 import torch.nn.functional as F
 
 from qorerl.recipes import te_mxfp8 as native
+from qorerl.recipes.spec import MXFP8_SMOOTHQUANT, resolve_recipe
+from qorerl.recipes.state import RecipeState
 
 
 @pytest.fixture(autouse=True)
@@ -199,8 +201,7 @@ def test_te_availability_reason_is_preserved(monkeypatch):
         native._validate_device(0)
 
 
-@pytest.mark.parametrize("rows", [1, 31, 33])
-def test_native_cuda_saved_mxfp8_operands_and_all_three_gemms(rows):
+def _require_native_cuda():
     if not torch.cuda.is_available():
         pytest.skip("Native MXFP8 test requires a CUDA GPU")
     if not 10 <= torch.cuda.get_device_capability()[0] < 12:
@@ -214,6 +215,11 @@ def test_native_cuda_saved_mxfp8_operands_and_all_three_gemms(rows):
     # Once the declared GPU/package prerequisites are present, extension/ABI
     # failures are real failures, not silently converted into test skips.
     native.validate_native_mxfp8()
+
+
+@pytest.mark.parametrize("rows", [1, 31, 33])
+def test_native_cuda_saved_mxfp8_operands_and_all_three_gemms(rows):
+    _require_native_cuda()
     generator = torch.Generator(device="cuda").manual_seed(610 + rows)
     x = (torch.randn(rows, 64, generator=generator, device="cuda") * 0.25).bfloat16().requires_grad_()
     weight = (torch.randn(64, 64, generator=generator, device="cuda") * 0.25).bfloat16()
@@ -251,3 +257,26 @@ def test_native_cuda_saved_mxfp8_operands_and_all_three_gemms(rows):
     for value, reference in [(actual, expected), (x.grad, x_ref.grad), (weight.grad, weight_ref.grad)]:
         relative_error = (value.float() - reference.float()).norm() / reference.float().norm()
         assert relative_error < 0.15
+
+
+def test_native_cuda_smoothquant_maps_te_gradients_to_canonical_operands():
+    _require_native_cuda()
+    generator = torch.Generator(device="cuda").manual_seed(826)
+    x = torch.randn(33, 64, generator=generator, device="cuda", dtype=torch.bfloat16).requires_grad_()
+    weight = torch.randn(32, 64, generator=generator, device="cuda", dtype=torch.bfloat16).requires_grad_()
+    state = RecipeState(resolve_recipe(MXFP8_SMOOTHQUANT))
+    name = state.add_target(0, weight)
+    state.install_scales({name: torch.linspace(0.25, 4.0, 64)})
+    scale = state.scales[name].cuda()
+
+    # Independent leaf operands expose the raw BF16 gradients of the same MXFP8 GEMMs.
+    x_effective = (x.detach().float() / scale).bfloat16().requires_grad_()
+    w_effective = (weight.detach().float() * scale).bfloat16().requires_grad_()
+    reference = native.native_mxfp8_linear(x_effective, w_effective)
+    actual = native.native_mxfp8_linear(state.transform_input(x, name), state.transform_weight(weight, name))
+    dy = torch.randn(actual.shape, generator=generator, device="cuda", dtype=torch.bfloat16)
+    reference.backward(dy)
+    actual.backward(dy)
+    torch.testing.assert_close(actual, reference)
+    torch.testing.assert_close(x.grad, (x_effective.grad.float() / scale).bfloat16())
+    torch.testing.assert_close(weight.grad, (w_effective.grad.float() * scale).bfloat16())

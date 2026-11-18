@@ -10,6 +10,14 @@ import ray
 from ray.util.placement_group import placement_group, remove_placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from qorerl.runtime.calibration import (
+    crosses_interval,
+    load_scales,
+    prepare_review,
+    read_payload,
+    read_review,
+    review_id,
+)
 from qorerl.runtime.checkpoint import resume_metadata, save_checkpoint, write_json
 from qorerl.runtime.ray_workers import RayLearnerWorker, RayRolloutWorker
 from qorerl.training.contracts import PolicyVersion, TrainingBatch, validate_and_order_trajectories
@@ -22,7 +30,7 @@ def append_json(path, value):
         stream.write(json.dumps(value, allow_nan=False) + "\n")
 
 
-def run_sync_grpo(cfg, output, *, address=None, resume=None):
+def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=None, reject_candidate=None):
     """One learner rank and independently placed rollout replicas.
 
     State machine: publish/ack -> sample -> assemble -> update -> publish/ack.
@@ -39,6 +47,20 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
         if getattr(hf, "_commit_hash", None):
             cfg = replace(cfg, model_revision=hf._commit_hash)
     metadata = resume_metadata(resume, cfg) if resume else None
+    if accept_candidate is not None and reject_candidate is not None:
+        raise ValueError("Choose one calibration decision")
+    decision, candidate_id = None, None
+    if accept_candidate is not None:
+        decision, candidate_id = "accept", accept_candidate
+    if reject_candidate is not None:
+        decision, candidate_id = "reject", reject_candidate
+    if decision and not resume:
+        raise ValueError("Calibration decisions require --resume")
+    review = read_review(resume, metadata, cfg, decision, candidate_id) if resume else None
+    calibration = cfg.calibration if cfg.recipe_calibration or cfg.recipe.uses_smoothquant else None
+    imported = None
+    if not resume and calibration and calibration.scale_artifact:
+        imported = load_scales(cfg, json.loads(Path(calibration.scale_artifact).read_text()))
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "config.json", cfg.to_dict())
@@ -46,7 +68,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
     task = CopyTask() if cfg.is_cpu_test else ArithmeticTask(cfg)
     owned_ray = not ray.is_initialized()
     worker_handles, resource_group = [], None
-    last_checkpoint = None
+    last_checkpoint = str(Path(resume).resolve()) if resume else None
     started = time.perf_counter()
     try:
         if owned_ray:
@@ -83,11 +105,9 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
         info = ray.get([worker.ready.remote() for worker in worker_handles], timeout=cfg.rpc_timeout)
         write_json(directory / "workers.json", {"driver_pid": os.getpid(), "workers": info})
         if resume:
-            ray.get(
-                learner.restore.remote((Path(resume) / "learner.pt").read_bytes()), timeout=cfg.rpc_timeout
-            )
+            ray.get(learner.restore.remote(read_payload(resume, review)), timeout=cfg.rpc_timeout)
 
-        def publish():
+        def publish(expected=None):
             # Ray passes this object reference directly to actors. The driver
             # never fetches full weights. Sharded/GPU transports will need a new
             # payload interface; the current snapshot is a full CPU tensor mapping.
@@ -96,17 +116,54 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
                 [worker.install_weights.remote(snapshot) for worker in rollout_workers],
                 timeout=cfg.rpc_timeout,
             )
-            if any(v != versions[0] for v in versions):
-                raise RuntimeError("Rollout replicas acknowledged different policies")
+            expected = versions[0] if expected is None else expected
+            if any(v != expected for v in versions):
+                raise RuntimeError("Rollout acknowledgment does not match the expected policy")
             return versions[0]
 
-        policy_version = publish()
+        def apply(scales):
+            expected = ray.get(learner.apply_calibration.remote(scales), timeout=cfg.rpc_timeout)
+            return policy_version if expected == policy_version else publish(expected)
+
+        event_log = directory / "calibration.jsonl"
+        expected = ray.get(learner.current_policy.remote(), timeout=cfg.rpc_timeout) if calibration else None
+        if imported is not None:
+            expected = ray.get(learner.apply_calibration.remote(imported), timeout=cfg.rpc_timeout)
+        policy_version = publish(expected)
         first_step = metadata["step"] if metadata else 0
         if policy_version.weight_version != first_step or (
             metadata and policy_version != PolicyVersion.from_dict(metadata["policy_version"])
         ):
             raise RuntimeError("Published policy and coordinator progress disagree")
+        if review is not None:
+            if decision != "reject":
+                policy_version = apply(load_scales(cfg, review["scale_artifact"]))
+            append_json(
+                event_log,
+                {
+                    "event": "rejected" if decision == "reject" else "applied",
+                    "candidate_id": review_id(review),
+                    "source_checkpoint": str(resume),
+                    "step": first_step,
+                    "policy": asdict(policy_version),
+                },
+            )
+        elif imported is not None:
+            append_json(
+                event_log,
+                {
+                    "event": "imported",
+                    "source": calibration.scale_artifact,
+                    "step": first_step,
+                    "policy": asdict(policy_version),
+                },
+            )
         last_checkpoint = save_checkpoint(directory, learner, cfg, first_step, policy_version)
+        completed_updates = (
+            ray.get(learner.completed_updates.remote(), timeout=cfg.rpc_timeout) if calibration else 0
+        )
+        pending_id = None
+        step, metrics = first_step, None
         for step in range(first_step + 1, cfg.steps + 1):
             tick = time.perf_counter()
             prompts = task.batch(step, cfg.prompts_per_step, cfg.seed)
@@ -127,13 +184,15 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
             advantages = compute_group_advantages(rewards, cfg.group_size)
             batch = TrainingBatch(trajectories, rewards, advantages, policy_version)
             update_start = time.perf_counter()
-            metrics = ray.get(learner.update.remote(ray.put(batch)), timeout=cfg.rpc_timeout)
+            batch_ref = ray.put(batch)
+            metrics = ray.get(learner.update.remote(batch_ref), timeout=cfg.rpc_timeout)
             observations = metrics.pop("recipe_observations", [])
             for observation in observations:
                 append_json(directory / "recipe_metrics.jsonl", observation)
             train_seconds = time.perf_counter() - update_start
             sync_start = time.perf_counter()
-            policy_version = publish()
+            expected = PolicyVersion(step, policy_version.recipe_id)
+            policy_version = publish(expected)
             if policy_version.weight_version != step or metrics["weight_version"] != step:
                 raise RuntimeError("Publication did not commit the expected training version")
             metrics.update(
@@ -159,7 +218,60 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
                     "advantages": batch.advantages.tolist(),
                 },
             )
-            if step % cfg.checkpoint_every == 0 or step == cfg.steps:
+            applied = False
+            if calibration and crosses_interval(
+                completed_updates, metrics["optimizer_steps"], calibration.refresh_every_optimizer_steps
+            ):
+                evaluation_start = time.perf_counter()
+                overrides, evidence = ray.get(
+                    learner.prepare_calibration.remote(batch_ref), timeout=cfg.rpc_timeout
+                )
+                append_json(
+                    event_log,
+                    {
+                        "event": "evaluated",
+                        "step": step,
+                        "policy": asdict(policy_version),
+                        "optimizer_steps": metrics["optimizer_steps"],
+                        "sample_policy": asdict(batch.policy_version),
+                        "evaluation_seconds": time.perf_counter() - evaluation_start,
+                        "evidence": evidence,
+                    },
+                )
+                if overrides:
+                    review = prepare_review(
+                        cfg, policy_version, metrics["optimizer_steps"], overrides, evidence
+                    )
+                    last_checkpoint = save_checkpoint(
+                        directory, learner, cfg, step, policy_version, review=review
+                    )
+                    candidate_id = review_id(review)
+                    if calibration.approval == "manual":
+                        pending_id = candidate_id
+                        append_json(
+                            event_log,
+                            {
+                                "event": "awaiting_review",
+                                "step": step,
+                                "candidate_id": pending_id,
+                                "checkpoint": last_checkpoint,
+                            },
+                        )
+                        break
+                    policy_version = apply(load_scales(cfg, review["scale_artifact"]))
+                    applied = True
+                    append_json(
+                        event_log,
+                        {
+                            "event": "applied",
+                            "step": step,
+                            "candidate_id": candidate_id,
+                            "policy": asdict(policy_version),
+                            "source_checkpoint": last_checkpoint,
+                        },
+                    )
+            completed_updates = metrics["optimizer_steps"]
+            if applied or step % cfg.checkpoint_every == 0 or step == cfg.steps:
                 last_checkpoint = save_checkpoint(directory, learner, cfg, step, policy_version)
             print(
                 f"step={step} reward={metrics['reward_mean']:.3f} "
@@ -168,11 +280,13 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None):
             )
         summary = {
             "schema": 2,
-            "status": "completed",
+            "status": "awaiting_review" if pending_id else "completed",
+            **({"candidate_id": pending_id} if pending_id else {}),
             "backend": f"{cfg.learner_backend}/{cfg.rollout_backend}",
             "first_step": first_step,
-            "last_step": cfg.steps,
+            "last_step": step,
             "final_metrics": metrics,
+            "policy_version": asdict(policy_version),
             "checkpoint": last_checkpoint,
             "seconds": time.perf_counter() - started,
             "native_gpu_executed": not cfg.is_cpu_test,

@@ -18,7 +18,7 @@
 已实现范围见 [MXFP8/Hadamard recipe](docs/recipes/mxfp8-hadamard.zh-CN.md)。GPU 收益验收的前提是 P0 通过、有可重复运行的 BF16 对照。
 
 - [x] 实现限定 MLP down projection 的原生 MXFP8 训练/导出/rollout 路径，以及固定 Hadamard 对照；明确 Fprop、Dgrad、Wgrad 精度，其他层保持 BF16。
-- [x] 定义首组 recipe 规格、包含选项的身份、固定 signs/target 状态及同配置恢复检查。未来动态 scales/history 仍需显式扩展。
+- [x] 定义首组 recipe 规格、包含选项的身份、固定 signs/target 状态及同配置恢复检查。SmoothQuant 已增加按内容版本化的动态 scales。
 - [x] 在启动时验证首组 recipe 的模型、形状、硬件/后端支持条件，不静默 fallback。
 - [ ] 在 GPU 跑算子 probe 和三组 GRPO 配置，确认非零实际更新、refit 和恢复；检查 native quantizer 之间的数值差异。
 - [ ] 为每个 recipe 给出来源、复现配置、测试工作负载、数值结果、训练质量、显存与端到端成本；报告无收益和失败的情况。
@@ -39,7 +39,11 @@
 
 ## P1：观测、暂停、用户调整和恢复
 
-触发条件：已有真实 recipe 和可解释的故障/退化观测。
+首条链路见[动态 SmoothQuant](docs/recipes/dynamic-smoothquant.zh-CN.md)。
+
+- [x] 定向或自动发现、周期准备、留出行比较、人工确认或按规则确认、保存后协同发布；支持已有 S 直接导入。
+- [ ] 在原生硬件复核 checkpoint 恢复和两端实际输出，分别报告局部误差、训推 log-prob 差、任务质量、显存和耗时。
+- [ ] 用跨批、独立 prompt 的样本验证刷新间隔、候选筛选和多层同时应用的条件，再考虑扩大自动授权范围。
 
 - [ ] 区分数值非法状态、统计异常和训练质量退化。记录原始证据、可能原因与支持的调整选项，不把 outlier 或负梯度余弦直接判为根因。
 - [ ] 配置 warning/pause 条件与安全停止边界；保留最近完整恢复点，同时保存 incident，不用异常状态覆盖恢复点。

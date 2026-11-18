@@ -1,47 +1,152 @@
 """CPU integration fixture. Real sampling/backprop, NOT Megatron or vLLM."""
 
+from types import SimpleNamespace
+
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from qorerl.engines.base import validate_install
 from qorerl.engines.single_rank_learner import SingleRankGRPOLearner, cpu_tree
+from qorerl.recipes.state import RecipeState, down_proj_name
 from qorerl.training.contracts import Trajectory, WeightSnapshot
 
 
+def _emulated_mxfp8_operand(value):
+    """Rowwise E4M3 rounding with a shared power-of-two scale for each group of 32."""
+    with torch.no_grad():
+        blocks = value.float().reshape(-1, 32)
+        maximum = blocks.abs().amax(dim=-1, keepdim=True)
+        exponent = (torch.floor(maximum.log2()) - 8).clamp(-127, 127)
+        scale = torch.exp2(exponent)
+        rounded = (blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
+        rounded = (rounded * scale).reshape_as(value).to(value.dtype)
+    # An explicit straight-through derivative exercises canonical optimizer updates.
+    return rounded + (value - value.detach())
+
+
+def _emulated_mxfp8_linear(x, weight):
+    return F.linear(_emulated_mxfp8_operand(x), _emulated_mxfp8_operand(weight))
+
+
+class TestProjection(nn.Module):
+    """Known per-channel imbalance makes held-out selection measurable on the CPU fixture."""
+
+    def __init__(self, index):
+        super().__init__()
+        self.down_proj = nn.Linear(32, 32, bias=False, dtype=torch.bfloat16)
+        gain = torch.ones(32, dtype=torch.bfloat16)
+        gain[index] = (65536, 2048, 1)[index]
+        self.register_buffer("gain", gain, persistent=False)
+        with torch.no_grad():
+            self.down_proj.weight.div_(gain)
+
+    def forward(self, x, name, installation):
+        x = x.to(torch.bfloat16) * self.gain
+        if name not in installation.weights:
+            return self.down_proj(x)
+        if installation.calibrator is not None:
+            installation.calibrator.capture(name, x)
+        state = installation.state
+        return _emulated_mxfp8_linear(
+            state.transform_input(x, name), state.transform_weight(self.down_proj.weight, name)
+        )
+
+
 class TestLM(nn.Module):
-    def __init__(self):
+    def __init__(self, recipe=None):
         super().__init__()
         self.embedding = nn.Embedding(14, 32)
         self.rnn = nn.GRU(32, 32, batch_first=True)
         self.head = nn.Linear(32, 14)
+        self.installation = None
+        if recipe is not None and recipe.uses_smoothquant:
+            # Preserve the canonical HF names used by the production payload.
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList()
+            state, weights = RecipeState(recipe), {}
+            selected = recipe.select_layers(3)
+            for index in range(3):
+                layer = nn.Module()
+                layer.mlp = TestProjection(index)
+                self.model.layers.append(layer)
+                if index in selected:
+                    weight = layer.mlp.down_proj.weight
+                    weights[state.add_target(index, weight)] = weight
+            self.installation = SimpleNamespace(state=state, weights=weights, calibrator=None)
 
     def forward(self, ids):
-        return self.head(self.rnn(self.embedding(ids))[0])
+        x = self.rnn(self.embedding(ids))[0]
+        if self.installation is not None:
+            for index, layer in enumerate(self.model.layers):
+                x = x + layer.mlp(x, down_proj_name(index), self.installation).float().tanh()
+        return self.head(x)
+
+    def execution_report(self):
+        report = {"backend": "torch_test"}
+        if self.installation is not None:
+            state = self.installation.state
+            report.update(
+                identity=state.active_identity,
+                scale_digest=state.scale_digest,
+                targets=dict(state.targets),
+                fprop="cpu_emulated_rowwise_block32_e4m3_bf16_linear",
+                backward="straight_through_fixture",
+            )
+        return report
 
 
 class TestLearner(SingleRankGRPOLearner):
+    calibration_fprop = staticmethod(_emulated_mxfp8_linear)
+
     def __init__(self, cfg):
         torch.set_num_threads(1)
         torch.manual_seed(cfg.seed)
-        self.setup_optimizer(cfg, TestLM(), 0, "cpu")
+        model = TestLM(cfg.recipe)
+        self.recipe_installation = model.installation
+        if self.recipe_installation is not None:
+            self.recipe_state = self.recipe_installation.state
+        self.setup_optimizer(cfg, model, 0, "cpu")
 
     def logits(self, input_ids):
         return self.model(input_ids)
 
     def export_weights(self):
-        return WeightSnapshot(self.policy_version, self.cfg.model, cpu_tree(self.model.state_dict()))
+        tensors = cpu_tree(self.model.state_dict())
+        state = None
+        if self.recipe_installation is not None:
+            if self.policy_version.recipe_id != self.recipe_state.active_identity:
+                raise ValueError("Export policy does not match active SmoothQuant scales")
+            self.recipe_state.validate_weights(tensors)
+            state = self.recipe_state.to_dict()
+        return WeightSnapshot(self.policy_version, self.cfg.model, tensors, state)
+
+    def execution_report(self):
+        return self.model.execution_report()
 
 
 class TestRollout:
     def __init__(self, cfg):
         torch.set_num_threads(1)
-        self.cfg, self.model, self.policy_version = cfg, TestLM().eval(), None
+        self.cfg, self.model, self.policy_version = cfg, TestLM(cfg.recipe).eval(), None
 
     def install_weights(self, snapshot):
         validate_install(snapshot, self.policy_version, self.cfg)
+        installation = self.model.installation
+        if installation is not None:
+            installation.state.validate(snapshot.recipe_state)
+            installation.state.validate_weights(snapshot.tensors)
+        elif snapshot.recipe_state is not None:
+            raise ValueError("CPU baseline cannot install a transformed recipe")
+        self.policy_version = None
         self.model.load_state_dict(snapshot.tensors, strict=True)
+        if installation is not None:
+            installation.state.load(snapshot.recipe_state)
         self.policy_version = snapshot.policy_version
         return self.policy_version
+
+    def execution_report(self):
+        return self.model.execution_report()
 
     @torch.no_grad()
     def generate(self, prompts, policy_version, seed):

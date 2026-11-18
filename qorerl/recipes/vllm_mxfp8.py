@@ -103,9 +103,9 @@ class _CachedMXFP8Method:
             raise RuntimeError("MXFP8 runtime method was attached to the wrong layer")
         if not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16 or x.device != layer.weight.device:
             raise ValueError("Native rollout MXFP8 requires BF16 activations on the weight device")
-        rotated = self.installation.state.rotate(x, self.name).contiguous()
+        effective_input = self.installation.state.transform_input(x, self.name).contiguous()
         with torch.autograd.profiler.record_function("qorerl.vllm.mxfp8.fprop"):
-            output = self.kernel.apply_weights(self.carrier, rotated, bias)
+            output = self.kernel.apply_weights(self.carrier, effective_input, bias)
         self.apply_calls += 1
         return output
 
@@ -122,11 +122,16 @@ class VLLMMXFP8Installation:
         self.state = state
         self.backend = backend
         self.methods = methods
-        self.ready = False
+        self._ready = False
+        self._cache_scale_digest = None
         self.refresh_count = 0
 
+    @property
+    def ready(self):
+        return self._ready and self._cache_scale_digest == self.state.scale_digest
+
     def invalidate(self):
-        self.ready = False
+        self._ready = False
 
     @torch.no_grad()
     def refresh(self):
@@ -137,7 +142,9 @@ class VLLMMXFP8Installation:
             _validate_weight(weight, method.name)
             if tuple(weight.shape) != self.state.targets[method.name]:
                 raise ValueError(f"Canonical rollout weight shape changed: {method.name}")
-            transformed = self.state.rotate(weight.detach(), method.name).contiguous()
+            transformed = self.state.transform_weight(weight.detach(), method.name).contiguous()
+            if self.state.spec.uses_smoothquant and not torch.isfinite(transformed).all().item():
+                raise ValueError(f"Nonfinite scaled SmoothQuant rollout weight: {method.name}")
             values, scales = self.backend.quantize(transformed, is_sf_swizzled_layout=False)
             if values.dtype != torch.float8_e4m3fn or scales.dtype != torch.uint8:
                 raise RuntimeError("Unexpected native MXFP8 payload or E8M0 scale dtype")
@@ -150,7 +157,8 @@ class VLLMMXFP8Installation:
             method.carrier = carrier
             method.apply_calls = 0
         self.refresh_count += 1
-        self.ready = True
+        self._cache_scale_digest = self.state.scale_digest
+        self._ready = True
 
     def report(self):
         entries = []

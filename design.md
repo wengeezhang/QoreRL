@@ -70,7 +70,7 @@ QoreRL 的首期价值是：把已有及新出现的量化、量化误差缓解�
 
 checkpoint 的 payload 和 metadata 写完后才通过目录 rename 发布。异常证据另存 `incident.json`，不把故障现场冒充可恢复 checkpoint。恢复从最近一个完整 checkpoint 重新创建引擎、加载 learner 状态、发布权重，再采新样本。
 
-当前只支持同训练语义恢复，修改 recipe、学习率等会被拒绝。未来“暂停 → 用户改配置 → 继续训练”需要显式验证状态兼容性与重建范围，并记录实验延续关系，不通过取消所有配置检查来实现。
+当前支持同配置续训，也支持从待确认的 checkpoint 接受或拒绝一次 SmoothQuant 缩放调整。决定绑定候选、更新前的 scale 状态及 learner checkpoint。变更模型、学习率或任意切换 recipe 仍需要单独的兼容性设计。
 
 `recipe_observation` 属于诊断配置，可在恢复时修改，不改变 recipe 身份或训练状态。观测窗口由已恢复的发布进度推导，不向模型 checkpoint 增加计数器或操作数副本。
 
@@ -106,12 +106,25 @@ canonical Parameter、FP32 master 和 Bridge 导出的权重始终保持原坐�
 
 后续 Dgrad/Wgrad、梯度方向、同 token 的训推 log-prob、端到端质量与成本需要分别定义采样、参考和预算，不能从当前前向图表推断。它们先提供可核对证据，是否触发暂停或调整仍由后续明确的控制流程决定。
 
-## 8. 已实现、待验证与历史材料
+## 8. 发现、准备、决定和应用可以分别进入
 
-- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe，以及可选局部前向观测和报告页面。
+每一阶段交付用户可以检查的结果。以动态 SmoothQuant 为例：
+
+| 阶段 | 用户或引擎提供什么 | 系统交付什么 |
+| --- | --- | --- |
+| 发现 | 允许操作的层和一组真实输入 | 每层的 outlier 分数、阈值、观测行数。允许只出报告。 |
+| 准备候选 | 检出的层，或用户直接指定的层 | 新的通道缩放向量。在同一份留出输入、相同权重上比较新旧 S，记录受益和未受益的层。 |
+| 确认 | 候选、证据和变更前 checkpoint | 用户明确接受或拒绝，也可事先选择按同一验证条件自动接受。 |
+| 应用 | 已接受的候选，或启动配置显式指定的外部 scale 文件 | learner 安装 S，rollout 重建派生权重。每个目标确认同一策略版本后才允许采样。 |
+
+训练编排决定何时采样、准备和发布。recipe 决定如何拟合与检验；worker 负责实际变换、refit 和确认。初版在同步 rollout 批之间操作，以成功的 optimizer 更新数触发周期。在途数据、异步同步、多 recipe 切换是另外的设计问题。具体配置、证据与恢复命令见[动态 SmoothQuant 指南](docs/recipes/dynamic-smoothquant.zh-CN.md)。
+
+## 9. 已实现、待验证与历史材料
+
+- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe，可选局部前向观测和报告页面；动态 SmoothQuant 的独立发现、候选比较、确认与协同发布。
 - 本地测试范围：真实 CPU Ray 进程及优化器更新、算法语义、失败时不确认 refit、恢复一致性、Hadamard 等价性与梯度、recipe 身份/状态。native adapter 使用显式 CPU stub 检验调用、padding、参数坐标和失败边界，不冒充 GPU 执行。
-- 待验证：原生 NVIDIA GPU BF16/MXFP8/Hadamard 执行、两端 log-prob 与 refit 数值结果、原生恢复行为、学习收益和成本。
-- 未实现：告警暂停控制器、改变 recipe 后恢复、多 rank、MoE、异步训练、自动自适应。
+- 待验证：原生 NVIDIA GPU BF16/MXFP8/Hadamard/SmoothQuant 执行、两端 log-prob 与 refit 数值结果、原生恢复行为、学习收益和成本。
+- 未实现：通用告警暂停控制器、跨 recipe 恢复、多 rank、MoE、异步训练、自动自适应。
 
 运行汇总区分 `native_gpu_executed`（执行事实）与 `native_gpu_acceptance`（当前不自动判定验收）。选择 native backend 并结束循环，不代表质量、有效更新或 refit 的验收全部通过。
 

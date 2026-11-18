@@ -11,6 +11,7 @@ from datetime import timedelta
 import torch
 
 from qorerl.engines.single_rank_learner import SingleRankGRPOLearner
+from qorerl.recipes.state import down_proj_name
 from qorerl.training.contracts import WeightSnapshot
 
 
@@ -86,12 +87,23 @@ class MegatronLearner(SingleRankGRPOLearner):
         )
         return logits[..., : self.vocab_size]
 
+    def _discovery_projections(self):
+        from megatron.core.transformer.module import Float16Module
+
+        model = self.model.module if isinstance(self.model, Float16Module) else self.model
+        layers = model.decoder.layers
+        if not len(layers):
+            raise ValueError("BF16 discovery requires dense decoder MLP down projections")
+        return {down_proj_name(i): layer.mlp.linear_fc2 for i, layer in enumerate(layers)}
+
     def export_weights(self):
         tensors = {
             name: value.detach().cpu().clone()
             for name, value in self.bridge.export_hf_weights(self.modules, cpu=True, show_progress=False)
         }
         if self.recipe_installation is not None:
+            if self.policy_version.recipe_id != self.recipe_state.active_identity:
+                raise ValueError("Learner policy version disagrees with its active recipe state")
             self.recipe_state.validate_weights(tensors)
         snapshot = WeightSnapshot(
             self.policy_version,

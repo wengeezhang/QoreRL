@@ -9,7 +9,7 @@ import torch
 
 from qorerl.engines.base import validate_install
 from qorerl.engines.single_rank_learner import SingleRankGRPOLearner
-from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, resolve_recipe
+from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, MXFP8_SMOOTHQUANT, resolve_recipe
 from qorerl.recipes.state import RecipeState
 from qorerl.training.config import TrainConfig
 from qorerl.training.contracts import PolicyVersion, WeightSnapshot
@@ -125,3 +125,49 @@ def test_checkpoint_keeps_fixed_transform_without_changing_parameter_basis():
     with pytest.raises(ValueError, match="fixed signs"):
         restored.restore(stream.getvalue())
     torch.testing.assert_close(before, restored.model.weight, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("bad_scale", ["missing", "width", "dtype", "negative", "zero", "nan", "inf", "grad"])
+def test_smoothquant_validates_all_scale_vectors_before_install(bad_scale):
+    state = make_state(resolve_recipe(MXFP8_SMOOTHQUANT))
+    first = next(iter(state.targets))
+    second = state.add_target(1, torch.zeros(32, 64))
+    previous = state.active_identity
+    scales = state.scales
+    scales[first].fill_(2)
+    if bad_scale == "missing":
+        scales.pop(second)
+    elif bad_scale == "width":
+        scales[second] = torch.ones(32)
+    elif bad_scale == "dtype":
+        scales[second] = scales[second].bfloat16()
+    elif bad_scale == "grad":
+        scales[second].requires_grad_()
+    else:
+        scales[second][0] = {"negative": -1, "zero": 0, "nan": float("nan"), "inf": float("inf")}[bad_scale]
+    with pytest.raises(ValueError, match="scale"):
+        state.install_scales(scales)
+    assert state.active_identity == previous
+    assert state.scales[first].eq(1).all()
+
+
+def test_smoothquant_scale_ownership_and_checkpoint_round_trip():
+    spec = resolve_recipe(MXFP8_SMOOTHQUANT)
+    state, other = make_state(spec), make_state(spec)
+    name = next(iter(state.targets))
+    scale = torch.linspace(0.25, 4, 128)
+    state.install_scales({name: scale})
+    identity = state.active_identity
+    assert identity != other.active_identity
+    scale.zero_()
+    state.scales[name].neg_()
+    payload = state.to_dict()
+    assert other.validate(payload) == identity
+    assert identity != other.active_identity
+    other.load(payload)
+    assert other.active_identity == identity == f"{spec.identity}:{payload['scale_digest']}"
+    torch.testing.assert_close(state.scales[name], other.scales[name], rtol=0, atol=0)
+    payload["scales"][name][0] *= 2
+    with pytest.raises(ValueError, match="digest"):
+        other.load(payload)
+    assert other.active_identity == identity

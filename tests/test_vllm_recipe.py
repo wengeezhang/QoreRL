@@ -5,9 +5,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from qorerl.engines.vllm import WeightLoaderExtension
+from qorerl.engines.vllm import VLLMRollout, WeightLoaderExtension
 from qorerl.recipes import vllm_mxfp8 as adapter
-from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, resolve_recipe
+from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, MXFP8_SMOOTHQUANT, resolve_recipe
+from qorerl.training.config import TrainConfig
+from qorerl.training.contracts import PolicyVersion, WeightSnapshot
 
 
 class _Unquantized:
@@ -165,9 +167,11 @@ def test_worker_refit_failure_invalidates_execution(stub_runtime, monkeypatch, s
             return {sorted(expected)[0]}
         return expected
 
+    original_refresh = installed.refresh
+
     def refresh_failure():
         # Even a refresh failing after publishing must leave execution disabled.
-        installed.ready = True
+        original_refresh()
         raise failure
 
     def synchronize():
@@ -239,3 +243,82 @@ def test_worker_rejects_malformed_recipe_weights_before_mutation(stub_runtime, m
         extension.qorerl_load_weights(tensors, installed.state.to_dict())
     # Nothing was mutated; the previously installed weights remain usable.
     assert installed.ready and installed.refresh_count == 1
+
+
+def test_smoothquant_worker_refit_verifies_identity_and_rebuilds_effective_weights(stub_runtime, monkeypatch):
+    model, quantized_inputs = stub_runtime
+    recipe = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1]})
+    installed = adapter.install(model, recipe)
+    extension = WeightLoaderExtension()
+    extension.model_runner = SimpleNamespace(model=model)
+    extension.qorerl_recipe_installation = installed
+    target = model.model.layers[1].mlp.down_proj
+    name = installed.methods[0].name
+    tensors = {n: p.detach().clone() for n, p in model.named_parameters()}
+    tensors[name] *= 0.5
+    unit_id = installed.state.active_identity
+    new_scale = torch.linspace(0.25, 2, 128)
+    source = adapter.RecipeState(recipe)
+    source.add_target(1, target.weight)
+    source.install_scales({name: new_scale})
+    assert unit_id != source.active_identity
+    loads = []
+
+    def load_weights(_):
+        assert not installed.ready
+        loads.append(name)
+        with torch.no_grad():
+            target.weight.copy_(tensors[name])
+        return set(tensors)
+
+    model.load_weights = load_weights
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    with pytest.raises(ValueError, match="identity"):
+        extension.qorerl_load_weights(tensors, source.to_dict(), unit_id)
+    assert installed.ready and not loads
+    payload = source.to_dict()
+    payload["scales"][name][0] *= 2
+    with pytest.raises(ValueError, match="digest"):
+        extension.qorerl_load_weights(tensors, payload, source.active_identity)
+    assert installed.ready and not loads
+
+    # Repeating a worker refit always starts from canonical weights.
+    for _ in range(2):
+        assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
+            source.active_identity
+        )
+        torch.testing.assert_close(quantized_inputs[-1], (tensors[name] * new_scale).bfloat16())
+        torch.testing.assert_close(target.weight, tensors[name], rtol=0, atol=0)
+        assert installed.report()["identity"] == source.active_identity
+        x = torch.randn(3, 128, dtype=torch.bfloat16)
+        target.quant_method.apply(target, x)
+        torch.testing.assert_close(target.quant_method.kernel.last_input, (x / new_scale).bfloat16())
+    # The active activation scales cannot be used with a carrier from another transform.
+    installed.state.install_scales({name: torch.ones(128)})
+    assert not installed.ready
+    with pytest.raises(RuntimeError, match="cache is invalid"):
+        target.quant_method.apply(target, x)
+
+
+def test_smoothquant_rollout_requires_worker_ack_of_exact_scale_identity(stub_runtime):
+    model, _ = stub_runtime
+    cfg = TrainConfig(recipe_id=MXFP8_SMOOTHQUANT)
+    installed = adapter.install(model, cfg.recipe)
+    rollout = VLLMRollout.__new__(VLLMRollout)
+    rollout.cfg = cfg
+    rollout.policy_version = PolicyVersion(0, installed.state.active_identity)
+    scales = installed.state.scales
+    next(iter(scales.values()))[0] *= 2
+    installed.state.install_scales(scales)
+    snapshot = WeightSnapshot(
+        PolicyVersion(0, installed.state.active_identity),
+        cfg.model,
+        {name: tensor.detach().clone() for name, tensor in model.named_parameters()},
+        installed.state.to_dict(),
+    )
+    rollout.llm = SimpleNamespace(collective_rpc=lambda *args, **kwargs: [cfg.policy_recipe_id])
+    with pytest.raises(RuntimeError, match="acknowledge"):
+        rollout.install_weights(snapshot)
+    assert rollout.policy_version is None
+    rollout.llm = SimpleNamespace(collective_rpc=lambda *args, **kwargs: [installed.state.active_identity])
+    assert rollout.install_weights(snapshot) == snapshot.policy_version

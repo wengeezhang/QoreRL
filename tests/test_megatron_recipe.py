@@ -12,9 +12,12 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from qorerl.engines.megatron import MegatronLearner
 from qorerl.recipes import megatron_mxfp8 as adapter
-from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, resolve_recipe
+from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, MXFP8_SMOOTHQUANT, resolve_recipe
 from qorerl.recipes.state import down_proj_name
+from qorerl.training.config import TrainConfig
+from qorerl.training.contracts import TrainingBatch, Trajectory
 
 
 class TERowParallelLinear(torch.nn.Linear):
@@ -232,3 +235,90 @@ def test_cpu_weights_are_rejected_by_production_guard(megatron_stubs, monkeypatc
     with pytest.raises(ValueError, match="canonical CUDA BF16 weights"):
         adapter.install(model, resolve_recipe(MXFP8_MLP), num_layers=2)
     assert all("forward" not in vars(layer.mlp.linear_fc2) for layer in model.module.decoder.layers)
+
+
+def test_smoothquant_routes_unscaled_capture_and_maps_both_gradients(megatron_stubs):
+    model = GPTModel(dtype=torch.float64)
+    target = model.decoder.layers[1].mlp.linear_fc2
+    reference = copy.deepcopy(target)
+    name = down_proj_name(1)
+    recipe = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1]})
+    installed = adapter.install(model, recipe, num_layers=2)
+    assert installed.weights == {name: target.weight}
+    before = target.weight.detach().clone()
+    scale = torch.linspace(0.25, 4, 64, dtype=torch.float32)
+    installed.state.install_scales({name: scale})
+    captured = []
+    installed.calibrator = SimpleNamespace(capture=lambda n, x: captured.append((n, x.detach().clone())))
+    x = torch.randn(5, 2, 64, dtype=torch.float64, requires_grad=True)
+    x_ref = x.detach().clone().requires_grad_()
+    gradient = torch.randn_like(x)
+    y = target(x)[0]
+    y_ref = reference(x_ref)[0]
+    y.backward(gradient)
+    y_ref.backward(gradient)
+
+    assert captured[0][0] == name
+    torch.testing.assert_close(captured[0][1], x, rtol=0, atol=0)
+    effective_x, effective_w = megatron_stubs.calls[0]
+    torch.testing.assert_close(effective_x, x / scale, rtol=0, atol=0)
+    torch.testing.assert_close(effective_w, before * scale, rtol=0, atol=0)
+    torch.testing.assert_close(y, y_ref, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(x.grad, x_ref.grad, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(target.weight.grad, reference.weight.grad, rtol=1e-12, atol=1e-12)
+    torch.testing.assert_close(target.weight, before, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "recipe,options",
+    [
+        ("bf16-baseline-v1", {}),
+        (MXFP8_MLP, {"layers": [1]}),
+        (MXFP8_HADAMARD, {"layers": [1], "block_size": 32}),
+    ],
+)
+def test_native_discovery_observes_existing_operator_and_removes_capture(megatron_stubs, recipe, options):
+    cfg = TrainConfig(
+        recipe_id=recipe,
+        recipe_options=options,
+        recipe_calibration={"discovery_only": True, "max_rows": 2, "outlier_threshold": 1},
+    )
+    model = Float16Module(GPTModel())
+    learner = MegatronLearner.__new__(MegatronLearner)
+    learner.recipe_installation = None
+    if cfg.recipe.is_mxfp8:
+        learner.recipe_installation = adapter.install(model, cfg.recipe, num_layers=2)
+        learner.recipe_state = learner.recipe_installation.state
+    learner.setup_optimizer(cfg, model, 0, "cpu")
+    learner.logits = lambda ids: model(F.one_hot(ids, 64).bfloat16())
+    ids = torch.tensor([[1, 3, 5]])
+    expected = learner.logits(ids)
+    policy = learner.policy_version
+    trajectory = Trajectory(0, 0, (1, 3, 5), (2,), (-1.0,), "", "stop", policy)
+    batch = TrainingBatch([trajectory], torch.zeros(1), torch.zeros(1), policy)
+    before = copy.deepcopy(model.state_dict())
+    fc2s = [layer.mlp.linear_fc2 for layer in model.module.decoder.layers]
+    forwards = [module.forward for module in fc2s]
+    overrides, evidence = learner.prepare_calibration(batch)
+    assert not overrides and learner.policy_version == policy
+    assert {e["target"] for e in evidence} == (
+        {down_proj_name(1)} if cfg.recipe.is_mxfp8 else {down_proj_name(0), down_proj_name(1)}
+    )
+    assert all(e["status"] == "discovered" and e["fit_rows"] == 2 for e in evidence)
+    torch.testing.assert_close(learner.logits(ids), expected, rtol=0, atol=0)
+    torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+
+    def fail(_):
+        if not cfg.recipe.is_mxfp8:
+            assert all(module._forward_pre_hooks for module in fc2s)
+        raise RuntimeError("injected replay error")
+
+    learner.logits = fail
+    with pytest.raises(RuntimeError, match="injected replay error"):
+        learner.prepare_calibration(batch)
+    assert [module.forward for module in fc2s] == forwards
+    assert all(not module._forward_pre_hooks for module in fc2s)
+    if learner.recipe_installation is None:
+        assert not hasattr(learner, "recipe_state")
+    else:
+        assert learner.recipe_installation.calibrator is None

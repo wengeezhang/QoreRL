@@ -2,7 +2,8 @@
 
 This adapter intentionally supports one model rank. It changes per-instance
 execution, not the upstream class or state_dict layout. Canonical parameters
-remain the optimizer/Bridge parameters; rotation autograd maps gradients back.
+remain the optimizer/Bridge parameters. Autograd maps the native kernel's
+operand gradients back through the configured transform.
 """
 
 from types import MethodType
@@ -14,18 +15,22 @@ from qorerl.recipes.te_mxfp8 import native_mxfp8_linear, validate_native_mxfp8
 
 
 class MegatronMXFP8Installation:
-    def __init__(self, state, backend):
+    def __init__(self, state, backend, targets=()):
         self.state, self.backend = state, backend
         self.calls = {name: 0 for name in state.targets}
         self.observer = None
+        self.calibrator = None
+        self.weights = {name: module.weight for name, module in targets}
 
     def forward(self, module, x, name):
         self.calls[name] += 1
         if self.observer is not None:
             self.observer.capture(name, x, module.weight)
-        x = self.state.rotate(x, name)
-        weight = self.state.rotate(module.weight, name)
-        # Both rotations are differentiable. Optimizer state never changes basis.
+        if self.calibrator is not None:
+            self.calibrator.capture(name, x)
+        x = self.state.transform_input(x, name)
+        weight = self.state.transform_weight(module.weight, name)
+        # SmoothQuant maps dX_eff to dX_eff/S and dW_eff to dW_eff*S.
         output = native_mxfp8_linear(x, weight)
         return output, None  # MCore's bias-free TERowParallelLinear contract.
 
@@ -82,7 +87,7 @@ def install(model, recipe, num_layers):
             raise ValueError("First MLP recipe requires bias-free down projections")
         _validate_native_weight(module.weight)
         targets.append((state.add_target(index, module.weight), module))
-    installation = MegatronMXFP8Installation(state, backend)
+    installation = MegatronMXFP8Installation(state, backend, targets)
     # Validate every target before changing any execution method.
     for name, module in targets:
 

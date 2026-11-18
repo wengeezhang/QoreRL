@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from qorerl.observability.config import RecipeObservationConfig
+from qorerl.recipes.calibration import CalibrationConfig
 from qorerl.recipes.spec import resolve_recipe
 
 
@@ -33,6 +34,7 @@ class TrainConfig:
     recipe_id: str = "bf16-baseline-v1"
     recipe_options: dict = field(default_factory=dict)
     recipe_observation: dict = field(default_factory=dict)
+    recipe_calibration: dict = field(default_factory=dict)
     learner_runtime_env: dict = field(default_factory=dict)
     rollout_runtime_env: dict = field(default_factory=dict)
 
@@ -52,18 +54,37 @@ class TrainConfig:
     def observation(self):
         return RecipeObservationConfig.from_dict(self.recipe_observation)
 
+    @property
+    def calibration(self):
+        return CalibrationConfig.from_dict(self.recipe_calibration)
+
     def __post_init__(self):
         pair = (self.learner_backend, self.rollout_backend)
         if pair not in {("megatron", "vllm"), ("torch_test", "torch_test")}:
             raise ValueError("Supported pairs: megatron/vllm or explicit torch_test/torch_test")
         recipe = self.recipe
-        if self.is_cpu_test and recipe.name != "fp32-test-v1":
-            raise ValueError("CPU test engines only support fp32-test-v1; no native quantization fallback")
+        if not isinstance(self.recipe_calibration, dict):
+            raise ValueError("recipe_calibration must be an object")
+        if self.recipe_calibration or recipe.uses_smoothquant:
+            calibration = self.calibration
+            if not recipe.uses_smoothquant and not (calibration.discovery_only and not self.is_cpu_test):
+                raise ValueError(
+                    "Scale calibration requires the SmoothQuant recipe; native recipes support discovery_only"
+                )
+        if self.is_cpu_test and not (recipe.name == "fp32-test-v1" or recipe.uses_smoothquant):
+            raise ValueError(
+                "CPU test engines only support fp32-test-v1 and explicit SmoothQuant emulation; "
+                "no native quantization fallback"
+            )
         if not self.is_cpu_test and recipe.name == "fp32-test-v1":
             raise ValueError("fp32-test-v1 requires the explicit CPU test engines")
         observation = self.observation
         if observation.enabled and (self.is_cpu_test or not recipe.is_mxfp8):
             raise ValueError("recipe_observation requires a native Megatron MXFP8 recipe; no CPU fallback")
+        if observation.enabled and recipe.uses_smoothquant:
+            raise ValueError(
+                "Use recipe_calibration for SmoothQuant evidence; Recipe Insights compares the fixed recipes"
+            )
         for name in (
             "steps",
             "prompts_per_step",
@@ -90,7 +111,13 @@ class TrainConfig:
 
     @classmethod
     def load(cls, path):
-        return cls(**json.loads(Path(path).read_text()))
+        path = Path(path)
+        data = json.loads(path.read_text())
+        calibration = data.get("recipe_calibration")
+        if isinstance(calibration, dict) and isinstance(calibration.get("scale_artifact"), str):
+            if calibration["scale_artifact"]:
+                calibration["scale_artifact"] = str((path.parent / calibration["scale_artifact"]).resolve())
+        return cls(**data)
 
     def to_dict(self):
         return asdict(self)

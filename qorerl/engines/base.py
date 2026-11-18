@@ -11,7 +11,15 @@ from qorerl.training.contracts import PolicyVersion, Prompt, TrainingBatch, Traj
 
 
 class LearnerEngine(Protocol):
+    policy_version: PolicyVersion
+    optimizer_steps: int
+
+    policy_version: PolicyVersion
+    optimizer_steps: int
+
     def update(self, batch: TrainingBatch) -> dict: ...
+    def prepare_calibration(self, batch: TrainingBatch) -> tuple[dict, list]: ...
+    def apply_calibration(self, scales: dict) -> PolicyVersion: ...
     def export_weights(self) -> WeightSnapshot: ...
     def checkpoint(self) -> bytes: ...
     def restore(self, payload: bytes) -> None: ...
@@ -28,7 +36,24 @@ class RolloutEngine(Protocol):
 
 def validate_install(snapshot: WeightSnapshot, current: PolicyVersion | None, cfg):
     snapshot.validate()
-    if snapshot.model_id != cfg.model or snapshot.policy_version.recipe_id != cfg.policy_recipe_id:
+    expected_id = cfg.policy_recipe_id
+    smooth = cfg.recipe.uses_smoothquant
+    if smooth:
+        from qorerl.recipes.state import scale_digest
+
+        state = snapshot.recipe_state
+        if not isinstance(state, dict) or state.get("identity") != expected_id:
+            raise ValueError("SmoothQuant publication requires the configured recipe state")
+        digest = scale_digest(state.get("scales"))
+        if digest != state.get("scale_digest"):
+            raise ValueError("SmoothQuant publication scale digest mismatch")
+        expected_id = f"{expected_id}:{digest}"
+    if snapshot.model_id != cfg.model or snapshot.policy_version.recipe_id != expected_id:
         raise ValueError("Model/recipe mismatch during weight publication")
-    if current is not None and snapshot.policy_version.weight_version <= current.weight_version:
-        raise ValueError("Weight versions must increase on an initialized rollout engine")
+    if current is not None:
+        version = snapshot.policy_version
+        scale_refresh = smooth and version.recipe_id != current.recipe_id
+        if version.weight_version < current.weight_version or (
+            version.weight_version == current.weight_version and not scale_refresh
+        ):
+            raise ValueError("Weight versions must increase unless publishing a new SmoothQuant transform")

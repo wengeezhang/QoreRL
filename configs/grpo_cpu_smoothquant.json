@@ -1,0 +1,27 @@
+{
+  "learner_backend": "torch_test",
+  "rollout_backend": "torch_test",
+  "model": "qorerl-cpu-copy-fixture",
+  "steps": 3,
+  "prompts_per_step": 4,
+  "group_size": 8,
+  "micro_batch_size": 2,
+  "learning_rate": 1e-06,
+  "max_new_tokens": 1,
+  "max_model_len": 16,
+  "rollout_workers": 2,
+  "checkpoint_every": 20,
+  "recipe_id": "mxfp8-smoothquant-mlp-down-v1",
+  "recipe_options": {
+    "layers": [
+      0,
+      1,
+      2
+    ]
+  },
+  "recipe_calibration": {
+    "refresh_every_optimizer_steps": 1,
+    "discover_outliers": true,
+    "approval": "manual"
+  }
+}

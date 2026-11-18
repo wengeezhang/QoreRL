@@ -12,6 +12,7 @@ from dataclasses import dataclass
 BASELINES = {"bf16-baseline-v1", "fp32-test-v1"}
 MXFP8_MLP = "mxfp8-mlp-down-v1"
 MXFP8_HADAMARD = "mxfp8-hadamard-mlp-down-v1"
+MXFP8_SMOOTHQUANT = "mxfp8-smoothquant-mlp-down-v1"
 
 
 @dataclass(frozen=True)
@@ -23,13 +24,20 @@ class RecipeSpec:
 
     @property
     def is_mxfp8(self):
-        return self.name in {MXFP8_MLP, MXFP8_HADAMARD}
+        return self.name in {MXFP8_MLP, MXFP8_HADAMARD, MXFP8_SMOOTHQUANT}
 
     @property
     def uses_hadamard(self):
         return self.hadamard_block_size is not None
 
+    @property
+    def uses_smoothquant(self):
+        return self.name == MXFP8_SMOOTHQUANT
+
     def to_dict(self):
+        transform = "block-rht-dh-v1" if self.uses_hadamard else None
+        if self.uses_smoothquant:
+            transform = "smoothquant-input-channel-v1"
         return {
             "schema": 1,
             "name": self.name,
@@ -37,7 +45,7 @@ class RecipeSpec:
             "layers": list(self.layers) if self.layers is not None else None,
             "hadamard_block_size": self.hadamard_block_size,
             "seed": self.seed,
-            "transform": "block-rht-dh-v1" if self.uses_hadamard else None,
+            "transform": transform,
             "quantization": "e4m3-e8m0-block32" if self.is_mxfp8 else None,
         }
 
@@ -58,7 +66,7 @@ class RecipeSpec:
 
 
 def resolve_recipe(name, options=None):
-    if name not in BASELINES | {MXFP8_MLP, MXFP8_HADAMARD}:
+    if name not in BASELINES | {MXFP8_MLP, MXFP8_HADAMARD, MXFP8_SMOOTHQUANT}:
         raise ValueError(f"Unsupported precision recipe: {name!r}")
     if options is None:
         options = {}

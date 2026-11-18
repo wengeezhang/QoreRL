@@ -5,6 +5,7 @@ optimizer and schedules, rather than inherit this single-rank implementation.
 """
 
 import io
+from contextlib import ExitStack
 from dataclasses import asdict
 
 import torch
@@ -24,6 +25,53 @@ def cpu_tree(value):
     return value
 
 
+def _calibration_prefixes(trajectories, max_rows):
+    """Replay a bounded set of distinct causal contexts in rollout order.
+
+    Trie nodes correspond to complete token prefixes. Repeated prompts and
+    shared response prefixes therefore cannot appear on both sides of the
+    fit/held-out split. Replaying one sequence at a time also excludes padding.
+    """
+    trie = {}
+    remaining = max_rows
+    for trajectory in trajectories:
+        tokens = trajectory.prompt_ids + trajectory.response_ids[:-1]
+        node, shared = trie, 0
+        for token in tokens:
+            if token not in node:
+                break
+            node = node[token]
+            shared += 1
+        stop = min(len(tokens), shared + remaining)
+        if stop == shared:
+            continue
+        for token in tokens[shared:stop]:
+            node[token] = {}
+            node = node[token]
+        yield tokens[:stop], shared
+        remaining -= stop - shared
+        if remaining == 0:
+            break
+
+
+class _CalibrationInputs:
+    def __init__(self, targets):
+        self.rows = {name: [] for name in targets}
+        self.seen = set()
+
+    def begin_sequence(self, length, shared):
+        self.length, self.shared = length, shared
+        self.seen.clear()
+
+    def capture(self, name, x):
+        if name in self.seen or x.numel() != self.length * x.shape[-1]:
+            raise ValueError(f"Calibration expected one unpadded token row per position for {name}")
+        self.seen.add(name)
+        # Single-sequence replay works for both [S,1,K] and [1,S,K] adapters.
+        rows = x.detach().reshape(self.length, -1)[self.shared :]
+        self.rows[name].append(rows.clone())
+
+
 class SingleRankGRPOLearner:
     """Explicit FP32 master weights, FP32 accumulation and AdamW states.
 
@@ -34,7 +82,10 @@ class SingleRankGRPOLearner:
 
     def setup_optimizer(self, cfg, model, pad_id, device):
         self.cfg, self.model, self.pad_id, self.device = cfg, model, pad_id, device
-        self.policy_version = PolicyVersion(0, cfg.policy_recipe_id)
+        recipe_id = (
+            self.recipe_state.active_identity if hasattr(self, "recipe_state") else cfg.policy_recipe_id
+        )
+        self.policy_version = PolicyVersion(0, recipe_id)
         self.parameters = [p for p in model.parameters() if p.requires_grad]
         self.master_parameters = [torch.nn.Parameter(p.detach().float().clone()) for p in self.parameters]
         self.optimizer = torch.optim.AdamW(self.master_parameters, lr=cfg.learning_rate, weight_decay=0.0)
@@ -45,6 +96,73 @@ class SingleRankGRPOLearner:
 
     def logits(self, input_ids):
         raise NotImplementedError
+
+    def _discovery_projections(self):
+        raise ValueError("This learner has no scoped projections for outlier discovery")
+
+    def _sample_calibration_inputs(self, trajectories, max_rows):
+        installation = self.recipe_installation
+        with ExitStack() as cleanup:
+            if installation is None:
+                projections = self._discovery_projections()
+                capture = _CalibrationInputs(projections)
+                for name, module in projections.items():
+
+                    def hook(_module, args, target=name):
+                        capture.capture(target, args[0])
+
+                    cleanup.callback(module.register_forward_pre_hook(hook).remove)
+            else:
+                capture = _CalibrationInputs(installation.weights)
+                cleanup.callback(setattr, installation, "calibrator", installation.calibrator)
+                installation.calibrator = capture
+            for tokens, shared in _calibration_prefixes(trajectories, max_rows):
+                capture.begin_sequence(len(tokens), shared)
+                self.logits(torch.tensor([tokens], device=self.device))
+                if capture.seen != capture.rows.keys():
+                    raise ValueError("Calibration replay did not execute every scoped target")
+        return {name: torch.cat(parts) for name, parts in capture.rows.items()}
+
+    @torch.no_grad()
+    def prepare_calibration(self, batch):
+        """Inspect current activations or compare candidate scales without installing a transform."""
+        from qorerl.recipes.calibration import outlier_report, prepare
+
+        config = self.cfg.calibration
+        if not config.discovery_only and not self.cfg.recipe.uses_smoothquant:
+            raise ValueError("Calibration requires the SmoothQuant recipe")
+        if batch.policy_version.recipe_id != self.policy_version.recipe_id or (
+            self.policy_version.weight_version - batch.policy_version.weight_version not in (0, 1)
+        ):
+            raise ValueError("Calibration input did not come from the current or preceding rollout policy")
+        if not batch.trajectories or any(
+            t.policy_version != batch.policy_version for t in batch.trajectories
+        ):
+            raise ValueError("Calibration requires a nonempty rollout batch with consistent policy identity")
+        samples = self._sample_calibration_inputs(batch.trajectories, config.max_rows)
+        if config.discovery_only:
+            return {}, outlier_report(samples, config)
+        return prepare(
+            self.recipe_installation.weights,
+            samples,
+            self.recipe_state.scales,
+            config,
+            fprop=getattr(self, "calibration_fprop", None),
+        )
+
+    def apply_calibration(self, scales):
+        """Install a complete validated transform assembled from approved per-target changes."""
+        if not self.cfg.recipe.uses_smoothquant:
+            raise ValueError("Scale installation requires the SmoothQuant recipe")
+        current = self.recipe_state.scales
+        if not isinstance(scales, dict) or not scales or set(scales) - set(current):
+            raise ValueError("Scale overrides must name at least one installed SmoothQuant target")
+        current.update(scales)
+        self.recipe_state.install_scales(current)
+        self.policy_version = PolicyVersion(
+            self.policy_version.weight_version, self.recipe_state.active_identity
+        )
+        return self.policy_version
 
     def update(self, batch):
         if batch.policy_version != self.policy_version:
@@ -164,17 +282,20 @@ class SingleRankGRPOLearner:
             saved_parameters = state["master_parameters"]
         else:
             raise ValueError("Checkpoint schema is incompatible")
-        if policy_version.recipe_id != self.cfg.policy_recipe_id:
-            raise ValueError("Checkpoint recipe is incompatible")
+        expected_id = self.cfg.policy_recipe_id
         if hasattr(self, "recipe_state"):
-            self.recipe_state.validate(state.get("recipe_state"))
+            expected_id = self.recipe_state.validate(state.get("recipe_state"))
         elif state.get("recipe_state") is not None:
             raise ValueError("Checkpoint contains unsupported recipe state")
+        if policy_version.recipe_id != expected_id:
+            raise ValueError("Checkpoint recipe is incompatible")
         self.model.load_state_dict(state["model"], strict=True)
         with torch.no_grad():
             for master, saved in zip(self.master_parameters, saved_parameters, strict=True):
                 master.copy_(saved)
         self.optimizer.load_state_dict(state["optimizer"])
+        if hasattr(self, "recipe_state"):
+            self.recipe_state.load(state["recipe_state"])
         self.policy_version = policy_version
         self.optimizer_steps = state["optimizer_steps"]
         torch.set_rng_state(state["torch_rng"])
