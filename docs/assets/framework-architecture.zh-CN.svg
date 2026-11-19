@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="710" viewBox="0 0 1024 710" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
+  <title id="title">QoreRL 同步 GRPO 的运行架构</title>
+  <desc id="desc">编排端向一组 Ray 采样进程分派题目，校验 vLLM 返回的轨迹及其策略版本，计算奖励和组内优势，再将训练批交给单个 Megatron 训练进程。两端按同一份精度 recipe 实现目标层的数值计算。训练端导出携带策略版本的权重和 recipe 状态，所有采样副本安装并确认预期版本后，编排端才启动下一批采样。</desc>
+  <defs>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --paper: #fbfdfc; --edge: #d0dfdd; --ink: #142e38;
+        --body: #38525b; --muted: #47626b; --bar: #123944;
+        --bar-rule: #42616a; --card: #ffffff; --card-edge: #accac6;
+        --rule: #d7e5e2; --teal: #14766e; --violet: #735e9e;
+        --recipe: #f4f1f9; --recipe-edge: #d8cde8; --recipe-title: #513a7b;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #12232c; --edge: #3a525a; --ink: #eef6f7;
+          --body: #cfdee1; --muted: #bfd0d4; --bar: #234d54;
+          --bar-rule: #5e8487; --card: #1d323b; --card-edge: #557971;
+          --rule: #426069; --teal: #83d4c4; --violet: #c9b8f2;
+          --recipe: #302d40; --recipe-edge: #605774; --recipe-title: #ecddff;
+        }
+      }
+      text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: var(--ink); }
+      .title { font-size: 38px; font-weight: 700; }
+      .role { font-size: 25px; font-weight: 650; }
+      .engine { font-size: 21px; font-weight: 650; }
+      .body { font-size: 19px; fill: var(--body); }
+      .label { font-size: 17px; fill: var(--muted); }
+      .mono { font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }
+      .control { stroke: var(--teal); fill: none; stroke-width: 2.5; marker-end: url(#arrow); }
+      .adapter { stroke: var(--violet); fill: none; stroke-width: 2.3; stroke-dasharray: 5 5; marker-end: url(#violet); }
+    </style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8.3" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="m2 1.5 5.5 3.5L2 8.5" fill="none" stroke="var(--teal)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="violet" viewBox="0 0 10 10" refX="8.3" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="m2 1.5 5.5 3.5L2 8.5" fill="none" stroke="var(--violet)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+  <rect x="1" y="1" width="1022" height="708" rx="24" fill="var(--paper)" stroke="var(--edge)" stroke-width="2"/>
+
+  <text x="40" y="64" class="title">同步 GRPO 的运行架构</text>
+  <text x="984" y="60" text-anchor="end" class="body">原生后端 · 单 rank 的稠密 Qwen3</text>
+
+  <!-- The driver dispatches work and checks acknowledgements, without fetching the full snapshot. -->
+  <rect x="40" y="96" width="944" height="112" rx="15" fill="var(--bar)"/>
+  <text x="66" y="146" class="role" style="fill:white">GRPO 编排端</text>
+  <text x="67" y="177" class="mono" font-size="17" style="fill:#a7d8d0">run_sync_grpo</text>
+  <path d="M316 120v64" stroke="var(--bar-rule)" stroke-width="1.5"/>
+  <text x="346" y="143" font-size="20" style="fill:white">核对轨迹版本与分组，计算奖励和组内优势</text>
+  <text x="346" y="177" font-size="20" style="fill:#bfe6df">所有采样副本确认预期版本后，才开始下一批采样</text>
+
+  <path d="M176 208v68" class="control"/>
+  <text x="191" y="251" class="label">训练批</text>
+  <path d="M675 208v68" class="control"/>
+  <text x="690" y="251" class="label">题目</text>
+  <path d="M779 280v-68" class="control"/>
+  <text x="794" y="251" class="label">轨迹、版本确认</text>
+
+  <!-- Each actor owns its engine. The horizontal arrow is a versioned publication, not a training-batch transfer. -->
+  <rect x="40" y="279" width="378" height="214" rx="14" fill="var(--card)" stroke="var(--card-edge)" stroke-width="1.7"/>
+  <text x="63" y="321" class="role">训练进程</text>
+  <text x="394" y="318" text-anchor="end" font-size="17" font-weight="600" style="fill:var(--teal)">1 个</text>
+  <text x="64" y="350" font-size="17" class="mono" style="fill:var(--muted)">RayLearnerWorker</text>
+  <path d="M63 368h331" stroke="var(--rule)" stroke-width="1.4"/>
+  <text x="63" y="402" class="engine">Megatron / Transformer Engine</text>
+  <text x="63" y="439" class="body">计算 GRPO 损失并更新模型参数</text>
+  <text x="63" y="470" class="body">保存模型、优化器及 recipe 状态</text>
+
+  <rect x="606" y="279" width="378" height="214" rx="14" fill="var(--card)" stroke="var(--card-edge)" stroke-width="1.7"/>
+  <text x="629" y="321" class="role">采样进程</text>
+  <text x="960" y="318" text-anchor="end" font-size="17" font-weight="600" style="fill:var(--teal)">每个副本 1 个</text>
+  <text x="630" y="350" font-size="17" class="mono" style="fill:var(--muted)">RayRolloutWorker</text>
+  <path d="M629 368h331" stroke="var(--rule)" stroke-width="1.4"/>
+  <text x="629" y="402" class="engine">vLLM</text>
+  <text x="629" y="439" class="body">生成同题多条回答与 token 对数概率</text>
+  <text x="629" y="470" class="body">安装快照并重建低精度权重缓存</text>
+
+  <text x="512" y="375" text-anchor="middle" font-size="19" font-weight="650" style="fill:var(--teal)">发布策略快照</text>
+  <path d="M419 391h182" class="control"/>
+  <text x="512" y="420" text-anchor="middle" class="label">权重与 recipe 状态</text>
+
+  <!-- The dashed arrows describe implementation, independent of the sampling schedule. -->
+  <path d="M176 560v-62" class="adapter"/>
+  <text x="191" y="534" font-size="17" style="fill:var(--violet)">训练端算子</text>
+  <path d="M779 560v-62" class="adapter"/>
+  <text x="794" y="534" font-size="17" style="fill:var(--violet)">采样端算子</text>
+  <rect x="40" y="559" width="944" height="115" rx="15" fill="var(--recipe)" stroke="var(--recipe-edge)" stroke-width="1.5"/>
+  <text x="64" y="610" class="role" style="fill:var(--recipe-title)">共享精度 recipe</text>
+  <text x="65" y="641" class="mono" font-size="16.5" style="fill:var(--violet)">RecipeSpec · RecipeState</text>
+  <path d="M332 584v66" stroke="var(--recipe-edge)" stroke-width="1.5"/>
+  <text x="358" y="608" class="body">指定目标层、量化格式及可选的 Hadamard 或 SmoothQuant 变换</text>
+  <text x="358" y="642" class="body">策略版本由权重代次（weight_version）与 recipe_id 共同标识</text>
+</svg>

@@ -1,65 +1,94 @@
-# QoreRL 设计原则与当前架构
+# QoreRL 设计原则与架构
 
-QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一份 recipe 定义哪些层使用哪种数值计算、训练和采样两端各自怎样执行，以及哪些状态需要一起保存。用户选择方案，查看它在自己任务上的表现，再决定是否调整。框架负责让这个选择在指定范围内生效，并让每批样本都能追溯到实际使用的策略版本。
+## 1. QoreRL 要解决什么问题
 
-## 1. 用户能控制什么
+QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。把论文中的方法用到强化学习时，采样端（rollout）要用它生成回答，训练端（learner）要用这些回答更新模型。如果中途改变了某些层的计算方式，用户还需要知道为什么值得改、两端从哪一批开始使用新方案，以及如何恢复到变更前的状态。
 
-用动态 SmoothQuant 举例，配置里有两份层列表，层号从 0 开始。**`recipe_options.layers` 固定哪些 decoder 层的 `mlp.down_proj` 自第一批起执行低精度计算**。**`smoothquant_layers` 在这份名单内选出一部分，给它们额外做通道缩放 S**。其余已选层直接做低精度矩阵乘法。名单外的层始终走 BF16。一次校准可以更新 S，也可以在授权范围内增加使用 S 的层。
+QoreRL 把这项工作分给两方。**Recipe 负责数值方法**，定义支持哪些算子、怎样执行，有可调参数时还要说明怎样提出和验证候选。**框架负责变更过程**，按用户给定的范围收集证据、处理审批、保存状态，并记录每批实际使用的策略版本。这样，换一种量化方法时，用户仍然可以用同一套流程决定让它运行在哪里、何时允许改变，以及要凭什么证据接受改变。
 
-当前低精度格式默认是 `mxfp8`。原生训练省略 recipe 时使用直接 MXFP8。需要全 BF16 对照时显式选择 `bf16-baseline-v1`。要换用 NVFP4，可在通用 recipe 名（如 `smoothquant-mlp-down-v1`）下设置 `recipe_options.precision: "nvfp4"`。无论哪种低精度，基础层范围和 S 的子集规则相同。原生 GPU 验收均待完成。[训练配置](qorerl/training/config.py) · [格式与选层](qorerl/recipes/spec.py)
+## 2. 一份 recipe 怎样进入训练
 
-| 用户场景 | 用户设置 | 实际行为及实现入口 |
+启动一份 recipe 时，用户先选定基础低精度格式和算子范围，再回答四个问题。如果只想按预设方案训练，确定初始范围即可。启用观测或允许调整时，其余问题才会影响运行行为。
+
+![用户先决定初始生效层、观测范围、允许的调整和批准方式。固定方案直接执行，只观测时输出报告，需要调整时才准备候选并在批准后应用。](docs/assets/recipe-lifecycle.zh-CN.svg)
+
+| 用户的决定 | 它在训练中意味着什么 |
+| --- | --- |
+| **哪些层现在就用这个 recipe？** | 指定第一批开始就做低精度计算的层。如果 recipe 还提供额外变换，可以只在其中一部分层启用。 |
+| **训练期间允许观察哪些层？** | 确定可以采集哪些层的数据。即便某个低精度层尚未启用额外变换，也可以观察它。观测期间继续用当前配置训练。 |
+| **观察之后允许改什么？** | 用户可以只看报告、允许刷新已启用的参数，或允许给范围内的其他层启用同一种变换。可选动作取决于这份 recipe 支持的能力，低精度层名单在运行开始时固定。 |
+| **谁批准这次修改？** | 有合格候选时，可交给用户查看证据后决定，也可由用户预先授权按验证条件自动接受。两种方式受同一组选层和变更权限约束。 |
+
+**同一个流程可以从不同位置进入。** 只想知道哪些层有异常，可以读发现报告并沿用原方案。已经知道目标层，可以在 recipe 允许时跳过筛选，直接为这些层拟合和比较候选。手里已有兼容的离线校准结果，则可以在启动时校验、应用，从第一批起使用。
+
+对支持周期调整的 recipe，一次观测可以产生零个或多个候选。每个候选应说清要改哪里、改成什么，以及在同一条件下比当前方案好在哪里。没有合格候选，或用户拒绝时，继续使用现行方案。接受后，框架在批次边界应用变更。若变更影响采样端的前向计算，要等两端都切换到新版本，再生成下一批回答。
+
+## 3. 以动态 SmoothQuant 为例
+
+SmoothQuant 给一个线性层的输入通道配一组缩放因子 `S`。计算时，每个输入通道除以自己的 S，权重的对应列乘以同一个 S，然后量化。对这份 recipe，用户可以控制低精度计算覆盖哪些层、哪些层额外使用 S，以及训练中是否允许更换 S。
+
+### 用户怎样设置范围和权限？
+
+下例选用默认格式 MXFP8，处理 decoder 中的 `mlp.down_proj`，层号从 0 开始。改用实验性的 NVFP4 时，四个问题和选层规则相同。[完整示例配置](configs/grpo_dynamic_smoothquant.json) · [格式与选层实现](qorerl/recipes/spec.py)
+
+| 决定 | 示例配置 | 运行行为 |
 | --- | --- | --- |
-| 固定量化方案 | 直接 MXFP8 选 `layers`。固定 Hadamard 再设分块和种子。固定 SmoothQuant 提供 `scale_artifact` 并设 `refresh_every_optimizer_steps: 0` | 训练和采样从第一批执行所选方案，外部 S 在首次采样前导入。[变换状态](qorerl/recipes/state.py) |
-| 只找 outlier | `discovery_only: true` | 写出发现分数后继续训练。原生 BF16 对照可单独观测各层；SmoothQuant 的观测限于获准校准的层。[输入采集](qorerl/engines/single_rank_learner.py) · [发现报告](qorerl/recipes/calibration.py) |
-| 在固定范围刷新 S | 指定 `layers` 和初始 `smoothquant_layers`，沿用默认的 `allow_layer_expansion: false` | 只评估已使用 S 的层。已知目标时可设 `discover_outliers: false`，直接拟合与验证。省略 `smoothquant_layers` 时默认在全部低精度层上使用 S。[校准](qorerl/recipes/calibration.py) |
-| 先给少数低精度层加 S，再按需扩大 | 初始 `smoothquant_layers` 选低精度范围的一个子集，另设 `allow_layer_expansion: true` | 校准覆盖 `layers`。已使用 S 的层可以刷新，其余直接 MXFP8 层可以提议首次加 S。两类变更均须通过候选验证。[选层](qorerl/recipes/spec.py) · [训练端](qorerl/recipes/megatron_mxfp8.py) · [采样端](qorerl/recipes/vllm_mxfp8.py) |
-| 人工审核或无人值守 | 默认 `approval: "manual"`，可选 `"auto"` | 两种方式共用相同的证据、检查点和发布过程，批准权限独立于可调整的层范围。[确认与续训](qorerl/runtime/calibration.py) |
+| 初始生效层 | `layers: [7,15,20,25]`，`smoothquant_layers: [7,15,20]` | 四层从启动起就跑 MXFP8，其中三层额外使用 S，第 25 层直接跑 MXFP8。 |
+| 观测范围 | `allow_layer_expansion: true`，`refresh_every_optimizer_steps: 20` | 每跨过 20 次实际优化器更新，在随后的同步批边界观测这四层的输入。 |
+| 可提议的变更 | `discover_outliers: true`，`max_activation_relative_l2: 0.05` | 可为前三层刷新 S，也可提议给第 25 层首次加 S。候选的局部输出误差须改善，首次启用还要求候选的相对误差不超过 5%。 |
+| 批准方式 | `approval: "manual"` | 有合格候选时保存并暂停。用户接受或拒绝后从检查点继续。选 `"auto"` 则自动应用满足同样条件的候选。 |
 
-周期默认每 20 次**实际完成的优化器更新**触发一次，在跨过间隔后的第一个同步批边界评估。省略 `layers` 表示选择所有支持的 decoder `mlp.down_proj`。指定较小名单可以限制量化范围。[校准配置与使用示例](docs/recipes/dynamic-smoothquant.zh-CN.md)
+同一份 recipe 也可以用得更简单。已有离线 S 时，提供 `scale_artifact` 并设 `refresh_every_optimizer_steps: 0`，训练全程使用导入的配置。只想看异常时可选 `discovery_only: true`。若只允许刷新现有 S，沿用默认的 `allow_layer_expansion: false`，校准只覆盖初始启用 S 的层。[各使用场景与配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
 <a id="smoothquant-expansion"></a>
 
 ### 动态扩展时，第 25 层什么时候用上 SmoothQuant？
 
-采用[原生示例配置](configs/grpo_dynamic_smoothquant.json)。用户选 `layers: [7,15,20,25]`、`smoothquant_layers: [7,15,20]`，并打开 `allow_layer_expansion`。四层从启动起就运行 MXFP8，只有第 25 层还可以首次加上 S。
-
 | 时刻 | 第 7、15、20 层 | 第 25 层 | 第 23 层等名单外层 |
 | --- | --- | --- | --- |
 | 第一次采样 | MXFP8 + SmoothQuant | 直接 MXFP8 | BF16 |
-| 到达校准周期 | 在留出激活上比较旧 S 与候选 S | 若发现 outlier，拟合 S，用相同权重和留出激活比较直接 MXFP8 与 MXFP8 + 候选 S | BF16，排除在本轮 SmoothQuant 校准外 |
-| 候选待审 | 继续用已发布的 S | 继续直接 MXFP8。候选必须降低相对 BF16 参考输出的误差，并满足配置的改善率和首次启用误差上限 | BF16 |
-| 批准并发布 | 应用本次获批的刷新 | 若该层获批，全部 rollout 确认后，从下一批开始使用 MXFP8 + SmoothQuant。候选未通过或被拒绝时继续直接 MXFP8 | BF16 |
-| 后续校准 | 可以继续刷新 S | 已启用后可继续刷新 S | BF16 |
+| 到达校准周期 | 对入选层比较旧 S 和候选 S | 若发现 outlier，拟合 S，并比较直接 MXFP8 与 MXFP8 + 候选 S | 保持 BF16，不参与本轮校准 |
+| 候选待审 | 继续使用已发布的 S | 继续直接 MXFP8 | BF16 |
+| 批准并发布 | 应用获批的刷新 | 若获批，所有采样副本确认后，从下一批开始用 MXFP8 + SmoothQuant | BF16 |
+| 后续校准 | 可继续刷新 S | 已启用后可继续刷新 S | BF16 |
 
-即使第 23 层有明显 outlier，这次运行也不会给它生成 SmoothQuant 候选。首次启用的误差上限 `max_activation_relative_l2` 可选。所比较的误差是局部线性层输出误差，端到端效果需单独验证。
+**发现 outlier 只说明这一层值得试。** Learner 用更新后的权重重放刚训练的轨迹前缀，一部分输入用于拟合 S，留出另一部分输入做比较。对同一层、同一权重、同一份留出输入，分别计算当前方案和候选方案相对 BF16 输出的误差。在仓库的另一个固定范围 CPU 示例中，两层都出现了 outlier。换 S 后，一层的误差从 7.82% 降到 4.79%，另一层从 3.31% 升到 3.86%，所以只有第一层进入候选。这个比较能支持一次局部数值决策，端到端奖励和成本还需在训练任务上验证。[候选验证与示例数据](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
-## 2. 一批训练由谁负责
+### 只换 S，为什么还要重新发布？
 
-**一个同步 GRPO 训练批**从 rollout 为每道题生成一组回答开始。编排端核对样本版本与分组完整性，计算奖励和组内优势，再把训练批交给 learner。learner 完成训练后导出权重，全部 rollout 副本安装并确认版本，下批采样才能开始。[训练主循环](qorerl/runtime/ray_runtime.py)
+假设第 7 层的原始权重 W 刚刚同步，用户随后接受了新的 S。下一次前向时，learner 会用新 S 计算 `X / S` 和 `W * S`。此时 vLLM 仍缓存着按**旧 S** 处理过的权重。即使 W 完全相同，采样端也需要拿到新 S 并重建缓存，才能与 learner 执行同一方案。这次发布后，权重代次保持不变，采样版本会随新的 S 更新。 [训练端适配](qorerl/recipes/megatron_mxfp8.py) · [采样端适配](qorerl/recipes/vllm_mxfp8.py)
 
-| 职责 | 负责的决定或计算 | 代码入口 |
+<details>
+<summary>查看动态 SmoothQuant 从校准到发布的完整流程图</summary>
+
+![每批先采样、更新和发布权重。到达校准周期后发现异常、比较候选。接受变更后发布新的 S，等待全部 rollout 确认后继续采样。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)
+
+</details>
+
+## 4. 框架怎样执行这套流程
+
+QoreRL 当前的原生实现采用同步 GRPO。**编排端安排工作，Ray worker 承接远程调用，后端引擎完成数值计算。** 引入新方法时，它的量化算子、需要保存的参数、候选比较逻辑由 recipe 及其后端适配实现。编排端决定什么时候发布、发布给哪些副本、什么时候开始下一批采样。
+
+![同步 GRPO 系统架构。编排端协调 Ray learner 与 rollout worker，训练端更新并导出策略快照，采样端安装并确认版本后才能开始下一批。](docs/assets/framework-architecture.zh-CN.svg)
+
+### 一批训练由谁负责？
+
+Rollout 为每道题生成一组回答。编排端核对策略版本与分组完整性，计算奖励和组内优势，再把训练批交给 learner。Learner 更新后导出权重和 recipe 状态。编排端把同一个快照的 Ray 对象引用交给所有 rollout 副本，收齐安装确认后再开始下一批。到达校准周期时，候选评估发生在这次常规权重发布之后。[同步训练主循环](qorerl/runtime/ray_runtime.py)
+
+| 职责 | 负责什么 | 代码入口 |
 | --- | --- | --- |
-| 训练编排 | 安排采样、更新和发布，在批次之间触发校准、保存检查点或暂停 | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
-| Ray worker | 各自持有 learner 或 rollout 引擎，接收远程调用，管理进程内资源 | [ray_workers.py](qorerl/runtime/ray_workers.py) |
+| 训练编排 | 调度采样、更新和发布，在批次边界触发校准、保存或暂停 | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
+| Ray worker | 持有各自的引擎、接收远程调用、报告就绪状态与版本 | [ray_workers.py](qorerl/runtime/ray_workers.py) |
 | 后端引擎 | Megatron / Transformer Engine 执行训练并导出权重，vLLM 安装权重并生成回答 | [Megatron learner](qorerl/engines/megatron.py) · [vLLM rollout](qorerl/engines/vllm.py) |
-| 精度 recipe | 选择目标层，定义数值变换和需要保存的状态，在后端实现对应算子 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [后端适配](qorerl/recipes/) |
-| 观测 | Recipe Insights 在采集到的操作数上重放固定方案，记录逐层误差和耗时，供用户比较 | [Recipe Insights](docs/recipe-insights.zh-CN.md) |
-| 任务、算法与数据 | 定义任务和奖励，计算优势与 loss，校验轨迹并构造模型输入 | [任务](qorerl/training/tasks.py) · [目标函数](qorerl/training/objective.py) · [轨迹协议](qorerl/training/contracts.py) · [批处理](qorerl/training/batching.py) |
+| 精度 recipe | 定义选层和数值变换，保存变换状态。支持校准的方法还负责生成并验证候选 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [校准](qorerl/recipes/calibration.py) |
+| 任务、算法与数据 | 实现任务和奖励、组内优势、loss、轨迹校验和批处理 | [任务](qorerl/training/tasks.py) · [目标函数](qorerl/training/objective.py) · [轨迹协议](qorerl/training/contracts.py) · [批处理](qorerl/training/batching.py) |
+| 独立观测 | Recipe Insights 在采集的操作数上重放固定方案，记录逐层误差和耗时 | [Recipe Insights](docs/recipe-insights.zh-CN.md) |
 
-例如，给 SmoothQuant 增加一种估计 S 的方法，拟合与验证逻辑属于 recipe。何时暂停采样、恢复后向哪些副本发布，仍由编排端决定。这样可以分别修改数值方法和训练时序。
+### 哪个版本在生效，训练从哪里恢复？
 
-## 3. 只换 S，为什么还要重新发布？
+每批轨迹带有 `PolicyVersion(weight_version, recipe_id)`。前者标识权重的发布代次，后者标识 recipe。动态 SmoothQuant 的 `recipe_id` 还包含已生效的各层 S 的内容摘要。因此只改 S 也会得到一个可区分的策略版本。Learner 保留原坐标系下的参数和优化器状态，rollout 按新状态更新用于推理的权重缓存。若发布失败，编排端停止运行，并在故障记录中给出最近的完整恢复点。[版本标识](qorerl/recipes/state.py) · [加载和确认](qorerl/engines/vllm.py)
 
-假设第 7 层的权重 W 刚刚同步。此时用户接受了新的 S。learner 下次计算这层时，会用新的 S 对输入做 `X / S`，对权重的对应列做 `W * S`，然后量化。vLLM 则已经缓存了按**旧 S** 缩放、量化和重排的权重。要让下批采样也执行用户选定的方案，vLLM 必须同步新的 S 并重建缓存，即使 W 的数值完全相同。
-
-![动态 SmoothQuant 的校准与发布。到达校准周期时，可以只做发现，也可以为指定层准备候选。启动时已有 S 则可以直接导入。接受候选后，两端应用新 S，所有 rollout 确认版本才开始下一批采样。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)
-
-**候选需要什么证据？** 默认每跨过 20 次实际优化器更新，learner 在同步批边界用更新后的权重重放刚训练的轨迹前缀。校准证据写入 `calibration.jsonl`。图中的固定范围 CPU 示例有两层都检出了 outlier。在相同的留出输入上，换 S 后，第 0 层相对同层 BF16 输出的误差从 7.82% 降至 4.79%，第 1 层却从 3.31% 升至 3.86%。因此只有第 0 层进入候选。这些证据回答的是该层的前向数值问题，训练奖励和端到端成本需要另外实测。[候选比较与 CPU 示例](docs/recipes/dynamic-smoothquant.zh-CN.md)
-
-**批准的是哪一次变更？** 产生候选后，编排端先保存变更前的 learner、优化器和 recipe 状态，并把候选及证据与这个检查点绑定。人工模式暂停训练，用户恢复时按候选 ID 接受或拒绝这份变更。拒绝后沿用原 S。自动模式应用满足预设条件的候选。[确认与恢复实现](qorerl/runtime/calibration.py)
-
-**如何知道下一批用的是新方案？** 每批轨迹记录 `PolicyVersion(weight_version, recipe_id)`。前者记录训练批的权重发布代次。对于动态 SmoothQuant，后者还标识 recipe 规格和当前各层 S 的内容摘要。只换 S 时，权重代次保持原值，策略版本仍会改变。learner 保留原坐标系的模型参数和优化器状态，发布权重与新的 recipe 状态。所有 rollout 重建缓存并确认预期版本后，编排端才放行采样。安装失败则停止本次运行，保留故障记录和最近的完整恢复点。早期版本允许把 BF16 层升级为 MXFP8，当时保存的扩层检查点与现在的固定低精度范围语义不同。恢复会检查 recipe 身份；运行新设计时需显式声明低精度范围并开始新的运行。[版本标识](qorerl/recipes/state.py) · [加载与确认](qorerl/engines/vllm.py)
+有待审候选时，框架把候选及证据绑定到**应用变更之前**的检查点。接受和拒绝都能从这个位置继续，人工和自动批准走同一条发布路径。恢复时还会检查 recipe 是否兼容。早期允许将 BF16 层升级为 MXFP8 的扩层检查点与当前选层规则不兼容，使用新规则需重新开始运行。[审核与恢复](qorerl/runtime/calibration.py) · [兼容性检查](qorerl/runtime/checkpoint.py)
 
 ### 一次人工确认会写下哪些文件？
 
@@ -134,18 +163,10 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 
 </details>
 
-其余文件按用途查阅即可。[运行文件写入位置](qorerl/runtime/ray_runtime.py)
+要从审批追到实际采样的那一批，可以继续查运行目录里的记录。[运行文件写入位置](qorerl/runtime/ray_runtime.py)
 
 | 文件 | 什么时候看 |
 | --- | --- |
 | `config.json`、`recipe.json`、`workers.json` | 复核启动条件时，分别查看解析后的训练配置、recipe 的规格及初始选层、实际启动的进程。本例 `recipe.json` 中的 `layers: [0,1]` 是固定的低精度范围，`smoothquant_layers: [1]` 是最初使用 S 的层。后续 S 的覆盖范围可从发布记录中核对。 |
 | `metrics.jsonl`、`trajectories.jsonl` | 排查某个训练批时，前者每批一行，包含 `reward_mean`、`clip_fraction` 等。后者保留该批实际采样的 token、行为策略 log-prob、版本，以及对应的奖励与优势。 |
 | `recipe_metrics.jsonl`、`incident.json` | 启用 Recipe Insights 且产生逐层观测时，前者记录局部比较。训练运行异常退出时，后者记录异常类型、消息和最近的恢复点 `last_recovery_checkpoint`。正常等待审核属于 `summary.json` 的状态。 |
-
-## 4. 今天可以依赖到什么程度
-
-| 状态 | 范围 |
-| --- | --- |
-| 本地已验证 | CPU Ray 多进程测试覆盖同步 GRPO、策略版本发布、SmoothQuant 的首次启用与刷新、接受与拒绝，以及从检查点继续训练。示例中的量化数字来自 CPU 模拟。[流程测试](tests/test_calibration_workflow.py) |
-| 原生代码已实现，GPU 待验收 | 首个后端组合是单 rank dense Qwen3、Megatron / TE 和 vLLM，覆盖 BF16 基线及选定 MLP 输出投影的直接低精度、固定 Hadamard 和动态 SmoothQuant。MXFP8 为默认格式，NVFP4 在相同层范围内可选。GPU 上的实际执行、refit 后同一 token 的训推概率差异、学习效果和成本均待测量。[运行与验收指南](docs/ray-grpo.zh-CN.md) |
-| 后续工作 | 当前可从检查点确认的变更限于 SmoothQuant 候选。通用告警后的跨 recipe 调整、多 rank、MoE、异步训练，以及根据训练反馈自动选择修复方案，列入[开发计划](todo.md)。 |
