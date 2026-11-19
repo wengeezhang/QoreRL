@@ -60,6 +60,80 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 
 **如何知道下一批用的是新方案？** 每批轨迹记录 `PolicyVersion(weight_version, recipe_id)`。前者记录训练批的权重发布代次。对于动态 SmoothQuant，后者还标识 recipe 规格和当前各层 S 的内容摘要。只换 S 时，权重代次保持原值，策略版本仍会改变。learner 保留原坐标系的模型参数和优化器状态，发布权重与新的 recipe 状态。所有 rollout 重建缓存并确认预期版本后，编排端才放行采样。安装失败则停止本次运行，保留故障记录和最近的完整恢复点。[版本标识](qorerl/recipes/state.py) · [加载与确认](qorerl/engines/vllm.py)
 
+### 一次人工确认会写下哪些文件？
+
+沿用第 1 节的三层 CPU 扩层例子。开始时只有第 1 层启用 SmoothQuant。为演示审核，测试把校准周期设为一次优化器更新。第一批训练结束后，框架提议让第 0 层也启用 SmoothQuant，此时训练暂停。打开这次运行的输出目录，按下面的顺序读就能还原经过。[生成这些文件的测试](tests/test_calibration_workflow.py)
+
+| 想知道什么 | 去哪里看 | 本例读到什么 |
+| --- | --- | --- |
+| 训练为什么停了，从哪里继续？ | 运行目录的 `summary.json` | `status` 是 `awaiting_review`。`checkpoint` 指向 `checkpoints/step-000001-before-calibration/`，`candidate_id` 是接受或拒绝时要传的完整 ID。 |
+| 保存时实际生效的是哪个版本？ | 上述检查点的 `metadata.json` | 第 1 批的权重已经发布，仍只有第 1 层启用。`policy_version` 标识当时生效的策略，`pending_candidate` 指向待审提案。普通检查点也有这份元数据，只有带候选的检查点才有这个字段和同目录的 `candidate.json`。 |
+| 这次准备改哪一层，凭什么改？ | 同一检查点的 `candidate.json` | `evidence` 记录所有被评估的层。第 0 层为 `proposed`，第 1 层为 `no_gain`，第 2 层为 `not_selected`。真正要发布的新 S 只出现在 `scale_artifact.scales` 的第 0 层条目里。 |
+| 用户的决定生效了吗？ | 运行目录的 `calibration.jsonl`，每行一个事件 | 原目录依次记录 `evaluated`、`awaiting_review`。人工接受并续训后，**新输出目录**记录 `applied`，选择拒绝则记录 `rejected`。接受分支的第 2 批在 `trajectories.jsonl` 中，每条轨迹的 `policy_version` 都与 `applied.policy` 一致。 |
+
+<details>
+<summary>展开查看这次暂停写入的实际 JSON</summary>
+
+以下节选保留实际字段和值。`metadata.json` 还保存了用于续训兼容性检查的完整 `config`。这里的 `boundary` 表示所有 rollout 已确认当前版本，且没有在途样本。
+
+```json
+{
+  "schema": 2,
+  "step": 1,
+  "policy_version": {
+    "weight_version": 1,
+    "recipe_id": "mxfp8-smoothquant-mlp-down-v1:8db1b7b0b4c975f3:b6e1880eba09c4845b562a93519ba3b449033125469094a655ac9506de039c25"
+  },
+  "pending_candidate": "90926bab5cb691d9df3450cb510206fbbf58b6b6115f0653c7ee387aa6a50645",
+  "boundary": "all_rollouts_acknowledged_no_inflight_samples"
+}
+```
+
+`candidate.json` 下面只展示第 0 层的证据和该层 32 个通道中前 3 个 S。相对 L2 误差都以同一份 BF16 输出为参照。当前层本来就在跑 BF16，所以第一项是零。直接切 MXFP8 是 7.82%，配上候选 S 是 4.79%。
+
+```json
+{
+  "optimizer_steps": 1,
+  "scale_artifact": {
+    "kind": "smoothquant_scales",
+    "scales": {
+      "model.layers.0.mlp.down_proj.weight": [72647.875, 1.6489697694778442, 1.4567848443984985]
+    }
+  },
+  "evidence": [{
+    "target": "model.layers.0.mlp.down_proj.weight",
+    "action": "activate",
+    "status": "proposed",
+    "current_relative_l2": 0.0,
+    "direct_mxfp8_relative_l2": 0.07822830391426117,
+    "candidate_relative_l2": 0.04792346157040247
+  }],
+  "checkpoint_sha256": "f7cdc1c05e624b891eda4a73b86ad6f3386a5daba829c74a7126abb754254539"
+}
+```
+
+运行目录的 `summary.json` 给出这次要审核的 ID，可直接传给 `--accept-candidate` 或 `--reject-candidate`。
+
+```json
+{
+  "status": "awaiting_review",
+  "last_step": 1,
+  "candidate_id": "90926bab5cb691d9df3450cb510206fbbf58b6b6115f0653c7ee387aa6a50645"
+}
+```
+
+续训时，`--resume` 接收整个检查点目录。框架校验候选内容算出的 ID 是否等于 `metadata.pending_candidate`、候选的 `source_policy` 是否等于 `metadata.policy_version`，以及同目录的 `learner.pt` 内容摘要是否等于 `candidate.checkpoint_sha256`。这样确认的就是当时看到的提案，恢复的也是与它配套的模型和优化器状态。[检查点写入](qorerl/runtime/checkpoint.py) · [续训校验](qorerl/runtime/calibration.py) · [接受或拒绝的命令示例](docs/recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)
+
+</details>
+
+其余文件按用途查阅即可。[运行文件写入位置](qorerl/runtime/ray_runtime.py)
+
+| 文件 | 什么时候看 |
+| --- | --- |
+| `config.json`、`recipe.json`、`workers.json` | 复核启动条件时，分别查看解析后的训练配置、recipe 的规格及初始选层、实际启动的进程。本例 `recipe.json` 中的 `layers: [1]` 是初始配置，之后哪层已启用要结合发布记录看。 |
+| `metrics.jsonl`、`trajectories.jsonl` | 排查某个训练批时，前者每批一行，包含 `reward_mean`、`clip_fraction` 等。后者保留该批实际采样的 token、行为策略 log-prob、版本，以及对应的奖励与优势。 |
+| `recipe_metrics.jsonl`、`incident.json` | 启用 Recipe Insights 且产生逐层观测时，前者记录局部比较。训练运行异常退出时，后者记录异常类型、消息和最近的恢复点 `last_recovery_checkpoint`。正常等待审核属于 `summary.json` 的状态。 |
+
 ## 4. 今天可以依赖到什么程度
 
 | 状态 | 范围 |
