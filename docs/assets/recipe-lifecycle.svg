@@ -1,58 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="464" viewBox="0 0 900 464" role="img" aria-labelledby="title desc" xml:lang="en">
-  <title id="title">At startup, choose one path</title>
-  <desc id="desc">Fixed settings apply to every batch. In a reports-only run, the framework also takes periodic measurements. Allowing changes adds a periodic comparison and manual or automatic approval. Without an accepted proposal the next batch keeps the current settings. An approved change is applied on the learner and acknowledged by every rollout replica before the next batch.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="736" height="536" viewBox="0 0 736 536" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">How a recipe decides what happens next</title>
+  <desc id="desc">Read down. Follow an arrow when the answer to its question is yes. Run the recipe on the chosen layers. Rollout and training use the initial settings from the first batch. Is periodic observation enabled, and is a check due? Measure the layers in scope for observation. Record the measurements. Observation alone keeps the settings fixed. Does the recipe support changes, and have you allowed them here? Prepare and test a proposed change. Compare it with the current settings on the same inputs. Did the proposal pass validation and get manual or rule-based approval? Apply the approved change for the next batch. The learner applies it and every rollout replica confirms before sampling. At the next scheduled check, return to step 2.</desc>
   <style>
     :root {
       color-scheme: light dark;
-      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #c8dcd6;
-      --green: #116b5f; --wash: #e8f5ef; --panel: #f2f8f5;
+      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #d3e2df;
+      --green: #106e61; --badge: #18564e; --accent-bg: #e7f5ef;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #435c62;
-        --green: #94e3c8; --wash: #1d3938; --panel: #192d34;
+        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #384e56;
+        --green: #9fe6ce; --badge: #23675c; --accent-bg: #1b3838;
       }
     }
     text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: var(--ink); }
-    .title { font-size: 30px; font-weight: 700; }
-    .heading { font-size: 22px; font-weight: 700; }
-    .outcome { font-size: 17px; font-weight: 700; }
+    .title { font-size: 29px; font-weight: 700; }
+    .step { font-size: 22px; font-weight: 700; }
     .body { font-size: 16px; fill: var(--body); }
-    .icon { fill: none; stroke: var(--green); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+    .when { font-size: 15px; fill: var(--green); font-weight: 600; }
+    .num { font-family: Inter, Arial, sans-serif; font-size: 16px; font-weight: 700; fill: white; text-anchor: middle; }
+    .flow { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke: var(--green); stroke-width: 2; }
   </style>
-  <rect x="1" y="1" width="898" height="462" rx="18" fill="var(--paper)" stroke="var(--edge)"/>
-    <text x="31" y="45" class="title">At startup, choose one path</text>
-    <text x="32" y="76" class="body">Select a recipe and its layers, then choose a path the recipe supports.</text>
-  <g>
-    <rect x="28" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
-    <g transform="translate(44 118)"><g class="icon"><rect x="2" y="10" width="17" height="13" rx="3"/><path d="M6 10V7a4.5 4.5 0 0 1 9 0v3m-4.5 6v2"/></g></g>
-    <text x="74" y="139" class="heading">Use fixed settings</text>
-    <text x="44" y="173" class="body">Train and sample with the</text>
-    <text x="44" y="195" class="body">initial settings every batch.</text>
-  </g>
-  <g>
-    <rect x="314" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
-    <g transform="translate(330 118)"><g class="icon"><path d="M1 3v19h21M6 17v-5m6 5V8m6 9V4"/></g></g>
-    <text x="360" y="139" class="heading">Get reports only</text>
-    <text x="330" y="173" class="body">Measure the layers periodically.</text>
-    <text x="330" y="195" class="body">Keep the recipe settings fixed.</text>
-  </g>
-  <g>
-    <rect x="600" y="99" width="272" height="140" rx="12" fill="var(--wash)" stroke="var(--green)"/>
-    <g transform="translate(616 118)"><g class="icon"><path d="M1 6h6m6 0h8M1 17h12m6 0h2"/><circle cx="10" cy="6" r="3"/><circle cx="16" cy="17" r="3"/></g></g>
-    <text x="646" y="139" class="heading">Allow changes</text>
-    <text x="616" y="173" class="body">Test new settings periodically.</text>
-    <text x="616" y="195" class="body">Choose manual or rule-based</text>
-    <text x="616" y="217" class="body">approval at startup.</text>
-  </g>
-  <path class="icon" d="M736 240v21m-5-6 5 6 5-6"/>
-  <rect x="28" y="265" width="844" height="177" rx="12" fill="var(--panel)" stroke="var(--edge)"/>
-    <text x="45" y="298" class="heading">At each scheduled check</text>
-    <text x="45" y="324" class="body">Measure the permitted layers. Compare any proposed change with the current settings on the same inputs.</text>
-  <path d="M45 340h810m-440 14v70" fill="none" stroke="var(--edge)"/>
-    <text x="45" y="375" class="outcome">No proposal passes, or you decline</text>
-    <text x="45" y="402" class="body">The next batch uses the current settings.</text>
-    <text x="434" y="375" class="outcome">A proposal passes and is approved</text>
-    <text x="434" y="402" class="body">The learner applies it. Once all rollout replicas</text>
-    <text x="434" y="423" class="body">confirm, the next batch uses the new settings.</text>
+  <rect x="1" y="1" width="734" height="534" rx="20" fill="var(--paper)" stroke="var(--edge)"/>
+  <text x="30" y="44" class="title">How a recipe decides what happens next</text>
+  <text x="31" y="71" class="body">Read down. Follow an arrow when the answer to its question is yes.</text>
+  <path d="M30 88H706" stroke="var(--edge)"/>
+  <rect x="21" y="413" width="694" height="102" rx="12" fill="var(--accent-bg)"/>
+  <circle cx="49" cy="121" r="16" fill="var(--badge)"/>
+  <text x="49" y="127" class="num">1</text>
+  <text x="80" y="128" class="step">Run the recipe on the chosen layers</text>
+  <text x="80" y="153" class="body">Rollout and training use the initial settings from the first batch.</text>
+  <path d="M49 142V203m-4-6 4 6 4-6" class="flow"/>
+  <text x="66" y="196" class="when">Is periodic observation enabled, and is a check due?</text>
+  <circle cx="49" cy="225" r="16" fill="var(--badge)"/>
+  <text x="49" y="231" class="num">2</text>
+  <text x="80" y="232" class="step">Measure the layers in scope for observation</text>
+  <text x="80" y="257" class="body">Record the measurements. Observation alone keeps the settings fixed.</text>
+  <path d="M49 246V307m-4-6 4 6 4-6" class="flow"/>
+  <text x="66" y="300" class="when">Does the recipe support changes, and have you allowed them here?</text>
+  <circle cx="49" cy="329" r="16" fill="var(--badge)"/>
+  <text x="49" y="335" class="num">3</text>
+  <text x="80" y="336" class="step">Prepare and test a proposed change</text>
+  <text x="80" y="361" class="body">Compare it with the current settings on the same inputs.</text>
+  <path d="M49 350V418m-4-6 4 6 4-6" class="flow"/>
+  <text x="66" y="405" class="when">Did the proposal pass validation and get manual or rule-based approval?</text>
+  <circle cx="49" cy="441" r="16" fill="var(--badge)"/>
+  <text x="49" y="447" class="num">4</text>
+  <text x="80" y="448" class="step">Apply the approved change for the next batch</text>
+  <text x="80" y="473" class="body">The learner applies it and every rollout replica confirms before sampling.</text>
+  <text x="80" y="501" class="when">At the next scheduled check, return to step 2.</text>
 </svg>
