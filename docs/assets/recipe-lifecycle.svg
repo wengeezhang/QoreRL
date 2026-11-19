@@ -1,81 +1,58 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="486" viewBox="0 0 900 486" role="img" aria-labelledby="title desc" xml:lang="en">
-  <title id="title">How to run a recipe</title>
-  <desc id="desc">Choose a recipe and the layers it covers, then start training. Fixed runs use the same settings for every batch. Turn on periodic observation for reports. If the recipe supports changes, compare a candidate with the current settings and approve manually or by rule. After publication the next batch uses the new settings. Rejected or unqualified candidates leave the current settings in use.</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="464" viewBox="0 0 900 464" role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">At startup, choose one path</title>
+  <desc id="desc">Fixed settings apply to every batch. In a reports-only run, the framework also takes periodic measurements. Allowing changes adds a periodic comparison and manual or automatic approval. Without an accepted proposal the next batch keeps the current settings. An approved change is applied on the learner and acknowledged by every rollout replica before the next batch.</desc>
   <style>
     :root {
       color-scheme: light dark;
-      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #d3e2df;
-      --green: #106e61; --line: #6da99e; --badge: #18564e; --accent-bg: #e7f5ef;
+      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #c8dcd6;
+      --green: #116b5f; --wash: #e8f5ef; --panel: #f2f8f5;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #384e56;
-        --green: #9fe6ce; --line: #77ad9f; --badge: #23675c; --accent-bg: #1b3838;
+        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #435c62;
+        --green: #94e3c8; --wash: #1d3938; --panel: #192d34;
       }
     }
     text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: var(--ink); }
-    .title { font-size: 32px; font-weight: 700; }
-    .step { font-size: 22px; font-weight: 700; }
+    .title { font-size: 30px; font-weight: 700; }
+    .heading { font-size: 22px; font-weight: 700; }
+    .outcome { font-size: 17px; font-weight: 700; }
     .body { font-size: 16px; fill: var(--body); }
-    .choice { font-size: 17px; font-weight: 700; }
-    .when { font-size: 15px; fill: var(--green); font-weight: 600; }
-    .num { font-family: Inter, Arial, sans-serif; font-size: 16px; font-weight: 700; fill: white; text-anchor: middle; }
-    .flow, .exit { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-    .flow { stroke: var(--green); stroke-width: 2; }
-    .exit { stroke: var(--line); stroke-width: 1.7; }
+    .icon { fill: none; stroke: var(--green); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   </style>
-  <rect x="1" y="1" width="898" height="484" rx="20" fill="var(--paper)" stroke="var(--edge)"/>
-  <text x="31" y="46" class="title">How to run a recipe</text>
-  <path d="M32 64H868" stroke="var(--edge)"/>
-  <rect x="24" y="396" width="852" height="72" rx="11" fill="var(--accent-bg)"/>
-
+  <rect x="1" y="1" width="898" height="462" rx="18" fill="var(--paper)" stroke="var(--edge)"/>
+    <text x="31" y="45" class="title">At startup, choose one path</text>
+    <text x="32" y="76" class="body">Select a recipe and its layers, then choose a path the recipe supports.</text>
   <g>
-    <circle cx="52" cy="100" r="16" fill="var(--badge)"/>
-    <text x="52" y="106" class="num">1</text>
-    <text x="85" y="107" class="step">Choose a recipe and its layers</text>
-    <text x="85" y="132" class="body">Start rollout and training with those settings.</text>
+    <rect x="28" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
+    <g transform="translate(44 118)"><g class="icon"><rect x="2" y="10" width="17" height="13" rx="3"/><path d="M6 10V7a4.5 4.5 0 0 1 9 0v3m-4.5 6v2"/></g></g>
+    <text x="74" y="139" class="heading">Use fixed settings</text>
+    <text x="44" y="173" class="body">Train and sample with the</text>
+    <text x="44" y="195" class="body">initial settings every batch.</text>
   </g>
   <g>
-    <path d="M490 100h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="106" class="choice">Keep the recipe fixed</text>
-    <text x="549" y="131" class="body">Use the initial settings every batch.</text>
-    <path d="M52 120V184m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="172" class="when">If you enable observation</text>
-  </g>
-
-  <g>
-    <circle cx="52" cy="207" r="16" fill="var(--badge)"/>
-    <text x="52" y="213" class="num">2</text>
-    <text x="85" y="214" class="step">Measure the selected layers</text>
-    <text x="85" y="239" class="body">Collect evidence at each scheduled check.</text>
+    <rect x="314" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
+    <g transform="translate(330 118)"><g class="icon"><path d="M1 3v19h21M6 17v-5m6 5V8m6 9V4"/></g></g>
+    <text x="360" y="139" class="heading">Get reports only</text>
+    <text x="330" y="173" class="body">Measure the layers periodically.</text>
+    <text x="330" y="195" class="body">Keep the recipe settings fixed.</text>
   </g>
   <g>
-    <path d="M490 207h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="213" class="choice">Collect reports only</text>
-    <text x="549" y="238" class="body">Write the report. Keep the current settings.</text>
-    <path d="M52 227V291m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="279" class="when">If you allow adjustments</text>
+    <rect x="600" y="99" width="272" height="140" rx="12" fill="var(--wash)" stroke="var(--green)"/>
+    <g transform="translate(616 118)"><g class="icon"><path d="M1 6h6m6 0h8M1 17h12m6 0h2"/><circle cx="10" cy="6" r="3"/><circle cx="16" cy="17" r="3"/></g></g>
+    <text x="646" y="139" class="heading">Allow changes</text>
+    <text x="616" y="173" class="body">Test new settings periodically.</text>
+    <text x="616" y="195" class="body">Choose manual or rule-based</text>
+    <text x="616" y="217" class="body">approval at startup.</text>
   </g>
-
-  <g>
-    <circle cx="52" cy="314" r="16" fill="var(--badge)"/>
-    <text x="52" y="320" class="num">3</text>
-    <text x="85" y="321" class="step">Prepare and test a candidate</text>
-    <text x="85" y="346" class="body">Compare it with the current settings on the same inputs.</text>
-  </g>
-  <g>
-    <path d="M490 314h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="320" class="choice">No candidate qualifies, or you decline</text>
-    <text x="549" y="345" class="body">Continue with the current settings.</text>
-    <path d="M52 334V400m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="386" class="when">Once approved by you or a rule</text>
-  </g>
-
-  <g>
-    <circle cx="52" cy="423" r="16" fill="var(--badge)"/>
-    <text x="52" y="429" class="num">4</text>
-    <text x="85" y="430" class="step">Use the new settings in the next batch</text>
-    <text x="85" y="455" class="body">The learner applies the change and every rollout replica confirms it.</text>
-  </g>
-  <text x="852" y="454" text-anchor="end" class="when">At the next check, repeat step 2</text>
+  <path class="icon" d="M736 240v21m-5-6 5 6 5-6"/>
+  <rect x="28" y="265" width="844" height="177" rx="12" fill="var(--panel)" stroke="var(--edge)"/>
+    <text x="45" y="298" class="heading">At each scheduled check</text>
+    <text x="45" y="324" class="body">Measure the permitted layers. Compare any proposed change with the current settings on the same inputs.</text>
+  <path d="M45 340h810m-440 14v70" fill="none" stroke="var(--edge)"/>
+    <text x="45" y="375" class="outcome">No proposal passes, or you decline</text>
+    <text x="45" y="402" class="body">The next batch uses the current settings.</text>
+    <text x="434" y="375" class="outcome">A proposal passes and is approved</text>
+    <text x="434" y="402" class="body">The learner applies it. Once all rollout replicas</text>
+    <text x="434" y="423" class="body">confirm, the next batch uses the new settings.</text>
 </svg>

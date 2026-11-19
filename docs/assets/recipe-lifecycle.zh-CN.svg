@@ -1,81 +1,57 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="900" height="486" viewBox="0 0 900 486" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
-  <title id="title">如何运行一份 recipe</title>
-  <desc id="desc">选好 recipe 和作用层即可启动采样和训练。固定运行时每批沿用初始配置。启用观测后，框架按周期记录指定层的数据。只看报告时继续用当前配置。允许调整时，框架比较新旧方案。只有候选达标并获人工或规则批准，训练端应用、所有采样副本确认后，下一批才用新方案。</desc>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="464" viewBox="0 0 900 464" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
+  <title id="title">启动时，选一种运行方式</title>
+  <desc id="desc">固定运行时每一批都用初始配置。只看报告时按周期观测，配置保持固定。允许调整时，每到检查周期，在许可范围内比较新旧配置。没有方案达标或用户拒绝时，下一批沿用现有配置。方案达标并获人工或规则批准后，训练端应用，全部采样副本确认，下一批才启用。</desc>
   <style>
     :root {
       color-scheme: light dark;
-      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #d3e2df;
-      --green: #106e61; --line: #6da99e; --badge: #18564e; --accent-bg: #e7f5ef;
+      --paper: #fbfdfc; --ink: #152f38; --body: #405a63; --edge: #c8dcd6;
+      --green: #116b5f; --wash: #e8f5ef; --panel: #f2f8f5;
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #384e56;
-        --green: #9fe6ce; --line: #77ad9f; --badge: #23675c; --accent-bg: #1b3838;
+        --paper: #12232c; --ink: #eef6f7; --body: #c2d3d6; --edge: #435c62;
+        --green: #94e3c8; --wash: #1d3938; --panel: #192d34;
       }
     }
     text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: var(--ink); }
-    .title { font-size: 32px; font-weight: 700; }
-    .step { font-size: 22px; font-weight: 700; }
+    .title { font-size: 30px; font-weight: 700; }
+    .heading { font-size: 22px; font-weight: 700; }
+    .outcome { font-size: 17px; font-weight: 700; }
     .body { font-size: 16px; fill: var(--body); }
-    .choice { font-size: 17px; font-weight: 700; }
-    .when { font-size: 15px; fill: var(--green); font-weight: 600; }
-    .num { font-family: Inter, Arial, sans-serif; font-size: 16px; font-weight: 700; fill: white; text-anchor: middle; }
-    .flow, .exit { fill: none; stroke-linecap: round; stroke-linejoin: round; }
-    .flow { stroke: var(--green); stroke-width: 2; }
-    .exit { stroke: var(--line); stroke-width: 1.7; }
+    .icon { fill: none; stroke: var(--green); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   </style>
-  <rect x="1" y="1" width="898" height="484" rx="20" fill="var(--paper)" stroke="var(--edge)"/>
-  <text x="31" y="46" class="title">如何运行一份 recipe</text>
-  <path d="M32 64H868" stroke="var(--edge)"/>
-  <rect x="24" y="396" width="852" height="72" rx="11" fill="var(--accent-bg)"/>
-
+  <rect x="1" y="1" width="898" height="462" rx="18" fill="var(--paper)" stroke="var(--edge)"/>
+    <text x="31" y="45" class="title">启动时，选一种运行方式</text>
+    <text x="32" y="76" class="body">先选好 recipe 和作用层，再从这份 recipe 支持的用法里选一种。</text>
   <g>
-    <circle cx="52" cy="100" r="16" fill="var(--badge)"/>
-    <text x="52" y="106" class="num">1</text>
-    <text x="85" y="107" class="step">选 recipe 和作用层，启动训练</text>
-    <text x="85" y="132" class="body">从第一批起，采样和训练都使用这份配置。</text>
+    <rect x="28" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
+    <g transform="translate(44 118)"><g class="icon"><rect x="2" y="10" width="17" height="13" rx="3"/><path d="M6 10V7a4.5 4.5 0 0 1 9 0v3m-4.5 6v2"/></g></g>
+    <text x="74" y="139" class="heading">按固定配置训练</text>
+    <text x="44" y="173" class="body">每批采样和训练都使用</text>
+    <text x="44" y="195" class="body">启动时选定的配置。</text>
   </g>
   <g>
-    <path d="M490 100h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="106" class="choice">只想按初始配置训练</text>
-    <text x="549" y="131" class="body">每一批都沿用这份配置。</text>
-    <path d="M52 120V184m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="172" class="when">启用周期观测</text>
-  </g>
-
-  <g>
-    <circle cx="52" cy="207" r="16" fill="var(--badge)"/>
-    <text x="52" y="213" class="num">2</text>
-    <text x="85" y="214" class="step">每到检查周期，观测指定层</text>
-    <text x="85" y="239" class="body">例如，记录哪些层的激活出现了离群值。</text>
+    <rect x="314" y="99" width="272" height="140" rx="12" fill="var(--paper)" stroke="var(--edge)"/>
+    <g transform="translate(330 118)"><g class="icon"><path d="M1 3v19h21M6 17v-5m6 5V8m6 9V4"/></g></g>
+    <text x="360" y="139" class="heading">只看观测报告</text>
+    <text x="330" y="173" class="body">按周期观测指定层并输出报告。</text>
+    <text x="330" y="195" class="body">每一批仍按初始配置训练。</text>
   </g>
   <g>
-    <path d="M490 207h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="213" class="choice">只想看报告</text>
-    <text x="549" y="238" class="body">写出观测结果，沿用当前配置。</text>
-    <path d="M52 227V291m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="279" class="when">允许调整</text>
+    <rect x="600" y="99" width="272" height="140" rx="12" fill="var(--wash)" stroke="var(--green)"/>
+    <g transform="translate(616 118)"><g class="icon"><path d="M1 6h6m6 0h8M1 17h12m6 0h2"/><circle cx="10" cy="6" r="3"/><circle cx="16" cy="17" r="3"/></g></g>
+    <text x="646" y="139" class="heading">允许调整配置</text>
+    <text x="616" y="173" class="body">按周期验证新配置。启动时指定</text>
+    <text x="616" y="195" class="body">由你审核，或按预设规则批准。</text>
   </g>
-
-  <g>
-    <circle cx="52" cy="314" r="16" fill="var(--badge)"/>
-    <text x="52" y="320" class="num">3</text>
-    <text x="85" y="321" class="step">生成候选方案，验证效果</text>
-    <text x="85" y="346" class="body">用同一批输入比较候选方案和当前方案。</text>
-  </g>
-  <g>
-    <path d="M490 314h39m-6 -5 6 5-6 5" class="exit"/>
-    <text x="549" y="320" class="choice">没有合格候选，或你拒绝</text>
-    <text x="549" y="345" class="body">按当前配置继续训练。</text>
-    <path d="M52 334V400m-4 -6 4 6 4-6" class="flow"/>
-    <text x="67" y="386" class="when">你已批准，或预设规则已通过</text>
-  </g>
-
-  <g>
-    <circle cx="52" cy="423" r="16" fill="var(--badge)"/>
-    <text x="52" y="429" class="num">4</text>
-    <text x="85" y="430" class="step">下一批开始使用新方案</text>
-    <text x="85" y="455" class="body">训练端先应用变更，所有采样副本确认后再采样。</text>
-  </g>
-  <text x="852" y="454" text-anchor="end" class="when">下个检查周期回到第 2 步</text>
+  <path class="icon" d="M736 240v21m-5-6 5 6 5-6"/>
+  <rect x="28" y="265" width="844" height="177" rx="12" fill="var(--panel)" stroke="var(--edge)"/>
+    <text x="45" y="298" class="heading">每到检查周期</text>
+    <text x="45" y="324" class="body">观测允许调整的层。如果有新方案，就用相同的输入和当前方案比较。</text>
+  <path d="M45 340h810m-440 14v70" fill="none" stroke="var(--edge)"/>
+    <text x="45" y="375" class="outcome">没有方案达标，或你拒绝了变更</text>
+    <text x="45" y="402" class="body">下一批沿用当前配置。</text>
+    <text x="434" y="375" class="outcome">方案达标，且已获批准</text>
+    <text x="434" y="402" class="body">训练端应用变更，所有采样副本确认后，</text>
+    <text x="434" y="423" class="body">下一批使用新配置。</text>
 </svg>

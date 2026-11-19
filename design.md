@@ -14,9 +14,11 @@ The framework gives recipes a shared training loop. It collects observations wit
 
 ## 2. How to run a recipe
 
-![Choose a recipe and its layers, then start training. Keep the configuration fixed, request observation reports, or allow adjustments. For an adjustment, compare a candidate with the active settings. An approved change takes effect in the next batch after both engines install it.](docs/assets/recipe-lifecycle.svg)
+The first batch uses your chosen recipe settings for both rollout and training. What happens in later batches depends on what you enable at startup.
 
-**Try the manual review path on CPU.** From the repository root, run the example below.
+![Three ways to run a recipe. Fixed settings apply to every batch. With reports enabled, the framework also takes periodic measurements. If you allow changes, it compares proposed settings with the current ones on the same inputs. If no proposal passes or you decline it, the next batch keeps the current settings. An approved change takes effect after the learner applies it and every rollout replica confirms.](docs/assets/recipe-lifecycle.svg)
+
+**Try “Allow changes” on CPU with manual approval.** From the repository root, run the example below.
 
 ```bash
 uv run qorerl train --config configs/grpo_cpu_smoothquant.json --out runs/sq-review
