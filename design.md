@@ -8,22 +8,31 @@ QoreRL packages quantization methods and techniques for reducing quantization er
 
 **The recipe defines the numerical method.** It specifies which operators it supports, what they compute and, when its parameters can change, how to propose and evaluate an update. **The framework manages changes during training.** It collects evidence within the scope the user authorized, handles approval, saves the training state, and records which policy version produced each batch. This gives different recipes a common way to express where they run, what can change, and what evidence warrants a change.
 
-## 2. How a recipe enters training
+## 2. How to run a recipe
 
-Start by choosing the base precision and the operators it covers. A fixed recipe can run with just its initial scope and settings. For recipes that support observation or adjustment, four questions describe how much control the framework has during training.
+![Choose a recipe and its layers, then start training. Keep the configuration fixed, request observation reports, or allow adjustments. For an adjustment, compare a candidate with the active settings. An approved change takes effect in the next batch after both engines install it.](docs/assets/recipe-lifecycle.svg)
 
-![Four choices govern the recipe lifecycle. A fixed recipe runs as configured. Observation can produce a report. Adaptive recipes can propose and validate a change, then publish it once approved.](docs/assets/recipe-lifecycle.svg)
+**Try the manual review path on CPU.** From the repository root, run the example below.
 
-| User decision | What it controls |
+```bash
+uv run qorerl train --config configs/grpo_cpu_smoothquant.json --out runs/sq-review
+```
+
+This example simulates low precision and checks for a better setting after each optimizer update. When a candidate qualifies, training saves a checkpoint and pauses. Open `runs/sq-review/summary.json` to find the checkpoint, then read its `candidate.json` to see which layer would change and how its error compares. Accept to use the new setting for the next batch, or reject to resume with the current one. [Accept or reject and resume](docs/recipes/dynamic-smoothquant.md#manual-review-on-cpu)
+
+<details>
+<summary>What should I set in my own recipe configuration?</summary>
+
+| Decision | Your choices |
 | --- | --- |
-| **Where does the recipe take effect in the first batch?** | Select the layers that run in low precision. If the recipe adds a transform, it can start on a subset of those layers. |
-| **Which layers may it observe during training?** | Choose where the framework can collect measurements. Eligible low-precision layers can be observed before they use the transform. Training continues with the active configuration during observation. |
-| **What may change after observation?** | Request a report, allow existing parameters to be refreshed, or let the same transform expand to other eligible layers. The recipe defines which actions it supports. The base set of low-precision layers is fixed at startup. |
-| **Who approves a change?** | Review the evidence yourself, or authorize automatic acceptance of candidates that meet your criteria. Both modes honor the same scope and permissions. |
+| Where does it run from the first batch? | Choose the base precision and low-precision layers. An additional transform can start on a subset of those layers. |
+| Where may it look during training? | Specify which eligible layers to measure and how often. Choose reports only if you want to review the measurements yourself. |
+| What may it change? | For recipes that support updates, allow parameter refreshes or let the same transform expand within the original low-precision layer set. |
+| Who approves? | Review a qualifying candidate yourself or preauthorize acceptance when the evidence meets your criteria. Both use the same publication path and wait for every rollout replica before the next batch. |
 
-**The entry point depends on what you already know.** To identify unusual layers, collect the discovery report and keep the current configuration. With known targets and a recipe that supports fitting, start by fitting and comparing candidates for those targets. With a compatible offline calibration artifact, validate and apply it at startup, ready for the first batch.
+Already know the target layers? A recipe that supports fitting can compare candidates directly on those layers. Already have compatible calibration results? Import them at startup for the first batch. If a periodic check yields no qualifying candidate, training continues with the active settings.
 
-For a recipe with periodic updates, an observation can yield zero or more proposals. Each proposal identifies the target, the change, and how the candidate compared with the active configuration under the same conditions. If nothing qualifies or the user declines, training continues with the active configuration. On acceptance, the framework applies the change at a batch boundary. A change to the rollout forward pass takes effect for sampling once the learner and all rollout replicas have switched to the new version.
+</details>
 
 ## 3. Worked example: dynamic SmoothQuant
 
