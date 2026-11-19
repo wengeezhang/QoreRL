@@ -1,137 +1,49 @@
 # QoreRL 设计原则与当前架构
 
-本文记录当前代码的职责边界与设计取舍，取代早期围绕自动敏感层修复的草案。后续工作、触发条件和验收标准见 [todo.md](todo.md)，运行说明见 [开发指南](docs/ray-grpo.zh-CN.md)。
+QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一份 recipe 定义哪些层使用哪种数值计算、训练和采样两端各自怎样执行，以及哪些状态需要一起保存。用户选择方案，查看它在自己任务上的表现，再决定是否调整。框架负责让这个选择在指定范围内生效，并让每批样本都能追溯到实际使用的策略版本。
 
-## 一次训练何时更换通道缩放？
+## 1. 用户能控制什么
 
-![动态 SmoothQuant 流程图。同步 GRPO 先采样、训练、发布权重。校准到期后可发现异常、拟合和验证候选；人工或自动接受后，learner 与所有 rollout 协同应用。已知目标层可跳过发现，启动时已有 S 可直接导入。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)
+同样是把 MLP 的输出投影（`down_proj`）放到 MXFP8 上运行，用户可以选择两种不同的做法。
 
-图中第 0 层和第 1 层都检出了 outlier，但只有第 0 层进入候选。两层的区别在于换用新 S 后，留出输入上的 MXFP8 输出是否更接近同层的 BF16 输出。数值来自 CPU 示例；原生 GPU 上的训练收益和开销仍待验证。[示例数据与运行方法](docs/recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)
-
-## 1. 项目要解决什么问题
-
-QoreRL 的首期价值是：把已有及新出现的量化、量化误差缓解技术变成有适用条件和验证证据的 recipe，让用户可以便捷选择、组合、观测，并在异常后保存状态、调整配置、继续训练。
-
-长期研究自动选择方案与自适应精度，但自动修复不是首期可用的前提。缩小 outlier、降低张量误差、接近 BF16 梯度，都不能单独证明训练收益；最终需要同时考察训练质量、数值行为和完整执行成本。
-
-底层复用 Ray、Megatron / Transformer Engine、vLLM 的能力。通用名称和成熟执行机制尽量沿用，把创新集中在 recipe、证据和恢复工作流上。
-
-## 2. 核心分层：谁安排工作，谁承接调用，谁完成计算
-
-| 层次 | 当前代码 | 应负责的事情 |
+| Recipe | 启动时选择什么 | 训练中会发生什么 |
 | --- | --- | --- |
-| 训练编排 | `qorerl/runtime/ray_runtime.py` 的 `run_sync_grpo()` | 安排资源，决定什么时候采样、训练、发布权重和保存状态 |
-| Ray worker | `qorerl/runtime/ray_workers.py` 的 `RayLearnerWorker`、`RayRolloutWorker` | 持有 engine，承接远程调用与进程内初始化/关闭 |
-| 后端引擎 | `qorerl/engines/` 的角色接口、工厂、Megatron/vLLM 实现 | 完成模型加载、前后向、参数更新、生成、权重导出与安装 |
-| 精度 recipe | `qorerl/recipes/` 的规格、状态、数学算子和后端适配 | 明确作用域，落实 Fprop/Dgrad/Wgrad 精度，保存变换状态并重建派生缓存 |
-| recipe 观测 | `qorerl/observability/` 的配置、局部重放和页面 | 有预算地采集真实操作数，记录配对数值/耗时证据；不修改训练方案或作质量判定 |
-| 算法 | `qorerl/training/objective.py` | 组内优势、策略目标与 loss 聚合语义 |
-| 任务与奖励 | `qorerl/training/tasks.py` | 产生任务输入、按任务规则评分 |
-| 数据协议与批处理 | `contracts.py`、`batching.py` | 前者定义字段和身份/版本/完整性检查；后者构造设备上的 padding、label、mask |
+| 固定 Hadamard | 指定层、旋转分块大小和随机种子 | 两端使用相同的固定旋转，对输入和权重做配套变换，再量化。权重持续更新，旋转保持固定。 |
+| 动态 SmoothQuant | 指定层，选择已有的通道缩放 S，或选择校准间隔及确认方式 | 只做发现时输出报告。启用拟合时，到期后比较当前 S 与候选 S，由用户决定是否更换，也可预先授权系统按验证结果选择。 |
 
-训练编排应当能够直接读成：
+两种方法共用选层、权重发布、版本确认和恢复机制。运行中的发现和审批是按需启用的。已知哪些层有 outlier 时，用户可以直接为它们准备候选。有兼容的 S 时，可以在首次采样前直接应用。[固定 Hadamard 指南](docs/recipes/mxfp8-hadamard.zh-CN.md) · [动态 SmoothQuant 指南](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
-```text
-让 rollout 生成样本
-        ↓
-校验身份、版本和完整组，按固定顺序整理样本
-        ↓
-按任务规则计算奖励，再按 GRPO 计算组内优势
-        ↓
-让 learner 更新参数
-        ↓
-导出新权重，所有 rollout 安装完成并确认版本
-        ↓
-在没有在途请求的边界保存 checkpoint，开始下一轮
-```
+## 2. 一批训练由谁负责
 
-编排代码不应知道 Megatron 的层名、vLLM 的量化 layout；vLLM 的加载逻辑不应决定下一轮 GRPO 何时开始。数据协议不应实现某一道任务的判题规则，也不应硬编码 GRPO 优势计算。
+**一个同步 GRPO 训练批**从 rollout 为每道题生成一组回答开始。编排端核对样本版本与分组完整性，计算奖励和组内优势，再把训练批交给 learner。learner 完成训练后导出权重，全部 rollout 副本安装并确认版本，下批采样才能开始。[训练主循环](qorerl/runtime/ray_runtime.py)
 
-当前 GRPO 数学定义仍由单 rank learner 调用，任务选择仍与首个原生场景/CPU fixture 绑定；这不是已完成的通用算法或任务插件系统。出现第二个真实需求时，再扩展明确的接口，避免先建设无实际用途的抽象。
-
-## 3. 名称表达什么
-
-- `Policy`：策略模型或动作分布的算法概念。
-- `Learner`：消费训练数据并更新模型参数的角色。
-- `Rollout`：用已发布策略采集回答的角色。
-- `Ray…Worker`：由 Ray Actor 托管的有状态执行进程。这里的 Ray Actor 不等于 actor–critic 中的 actor。
-- `Engine`：封装具体训练或推理后端，不决定全局训练时序。
-- `PaddedMicrobatch`：每条回答占一行并补齐长度；当前没有 sequence packing。
-- `behavior_log_probs`：实际生成这些 token 的行为策略给出的 log-prob，不默认等于训练侧旧策略重算值。
-- `policy_version`：策略发布身份，包含 `weight_version` 和 `recipe_id`，不是策略模型对象。
-
-当前 `weight_version` 表示每个训练 batch 处理后的发布代次，不是权重内容 hash，也不是 optimizer step 数。一个 batch 可以执行多个 optimizer step；全零优势也可以不更新参数但推进发布代次。日志中的 `optimizer_steps` 单独记录真正的更新次数。
-
-配置中的 `recipe_id` 是 preset 名称。MXFP8 的实际 `PolicyVersion.recipe_id` 还包含规格 hash，覆盖选层、变换版本、block size 和 seed。checkpoint / 同步快照另带实际 target 形状与固定 signs，并在加载前核对。它们不是通用可组合 recipe 或热切换系统；新增动态量化状态仍必须纳入执行身份和恢复协议。
-
-## 4. 发布与恢复的边界
-
-保留三个不同动作：
-
-1. `export_weights`：learner 形成可同步的权重表示。
-2. `install_weights`：rollout 完成加载，必要时包含重排、派生状态重建；成功后才确认版本。
-3. `publish`：编排侧等待所有目标 rollout 的确认，随后允许新一轮采样。
-
-当前只实现同步执行，更新时没有在途生成请求。vLLM refit 开始前清除有效版本，失败后不能继续带着未确认状态采样。optimizer update 和 refit 不自动重试，因为中途失败并不代表完全没有修改状态。
-
-checkpoint 的 payload 和 metadata 写完后才通过目录 rename 发布。异常证据另存 `incident.json`，不把故障现场冒充可恢复 checkpoint。恢复从最近一个完整 checkpoint 重新创建引擎、加载 learner 状态、发布权重，再采新样本。
-
-当前支持同配置续训，也支持从待确认的 checkpoint 接受或拒绝一次 SmoothQuant 缩放调整。决定绑定候选、更新前的 scale 状态及 learner checkpoint。变更模型、学习率或任意切换 recipe 仍需要单独的兼容性设计。
-
-`recipe_observation` 属于诊断配置，可在恢复时修改，不改变 recipe 身份或训练状态。观测窗口由已恢复的发布进度推导，不向模型 checkpoint 增加计数器或操作数副本。
-
-当前写出 schema 2 checkpoint，继续读取 schema 1。版本字段为 `policy_version.{weight_version,recipe_id}`，master 参数为 `master_parameters`；recipe 增加可选 `recipe_state`。旧 BF16/CPU checkpoint 无该字段时仍可恢复；启用变换的 checkpoint 必须有匹配状态。该兼容不意味着支持任意历史算法或精度方案之间迁移。
-
-## 5. 单 rank 基线与当前限制
-
-`SingleRankGRPOLearner` 独立于角色接口，明确承载当前的 GRPO、FP32 master 参数、梯度累积和 PyTorch AdamW。Megatron adapter 当前使用它作为可核对的单 rank 更新实现；它没有 Megatron 原生分布式 optimizer 或 pipeline schedule。
-
-模型梯度先以模型 dtype 产生，再转为 FP32 跨 microbatch 累积。这里没有宣称整个 backward 使用 FP32。未来多卡 learner 应使用原生 Megatron 调度、梯度同步、optimizer 和分片 checkpoint，不在当前循环上简单增加 DP/TP 参数。
-
-当前 loss 接收完整 logits；词表并行和 fused loss 需要引擎提供合适的可微分 token log-prob/loss 路径。当前权重快照是完整 CPU tensor 字典，checkpoint payload 是 bytes；支持分桶或 GPU 传输时还需要调整 payload 接口，不能认为已有通用高性能传输抽象。
-
-为首条链路可核对，当前使用完整组同步、普通 padding、完整 CPU 权重传输，关闭 prefix cache/CUDA graph。性能优化必须保留样本、版本、loss 归一化和恢复语义，并用实测结果验证。
-
-## 6. recipe 应当扩展哪里
-
-recipe 需要描述 Fprop、Dgrad、Wgrad、权重导出和 rollout 各自的数值方案、后端/硬件要求、可组合条件及状态保存需求。后端负责把这些要求落实到实际执行；编排侧负责选择、验证、记录、协调生效与恢复边界。
-
-同一个 recipe 可以为训练与 rollout 指定不同操作。例如只调整训练侧 Wgrad 的操作数精度，不要求 rollout 执行反向。影响前向策略的变更需要协调两端并直接检查训推概率差异；相同配置名称不保证相同数值结果。
-
-每项方法先作为明确范围内的实验选项，经过验证后再标记为适用于某类工作负载的 recipe。组合的收益需要重新验证。自动推荐和自动应用均要保留触发证据、改动和后续效果。
-
-第一组实现只作用于 dense Qwen3 的 MLP down projection：直接 MXFP8，或先对输入/权重配套做固定 Hadamard 再 MXFP8。训练使用 TE 原生前后向 GEMM；rollout 使用 vLLM 原生 FlashInfer CUTLASS MXFP8 kernel。仅替换选定实例的执行，不改全局类/量化注册表。数学算子、状态及引擎适配均在 recipes 中；Ray 主循环只记录规格、传递状态并等待安装确认。
-
-canonical Parameter、FP32 master 和 Bridge 导出的权重始终保持原坐标系。训练时旋转的 backward 把梯度映射回来；rollout 的旋转/量化/kernel layout 是可丢弃缓存，refit 后重建，不写回 canonical Parameter。vLLM 在显存 profiling 前安装 recipe，加载或 GPU 同步失败后保持不可服务。当前保留 BF16 与派生缓存、使用未融合的 Hadamard，成本和收益都需实测；详见 [recipe 说明](docs/recipes/mxfp8-hadamard.zh-CN.md)。
-
-## 7. 观测证据的边界
-
-当前 [Recipe Insights](docs/recipe-insights.zh-CN.md) 默认关闭；启用后，每 20 步从已安装目标层中轮转选择最多两层，截取首个 epoch、首个 microbatch 的输入前缀和更新前 canonical 权重。图释放后在副本上重放 BF16、MXFP8、MXFP8 + Hadamard，不干预训练输出、梯度、optimizer 或 recipe 状态。编排只将记录写入 `recipe_metrics.jsonl`，页面读取证据，不参与训练控制。
-
-参考值是同一 X、W 的 BF16 `F.linear`，不是全模型 BF16 反事实。CUDA event 计时包含局部调用的变换、量化、padding 和 GEMM，不表示 FLOPs 或端到端加速；`probe_seconds` 是主机捕获加重放墙钟时间，可能含排队训练工作，不能当成隔离后的观测开销。副本字节预算不约束变换临时空间或 workspace。错误、跳过和未观测层保留显式状态，演示数据与实测数据区分来源。
-
-后续 Dgrad/Wgrad、梯度方向、同 token 的训推 log-prob、端到端质量与成本需要分别定义采样、参考和预算，不能从当前前向图表推断。它们先提供可核对证据，是否触发暂停或调整仍由后续明确的控制流程决定。
-
-## 8. 发现、准备、决定和应用可以分别进入
-
-每一阶段交付用户可以检查的结果。以动态 SmoothQuant 为例：
-
-| 阶段 | 用户或引擎提供什么 | 系统交付什么 |
+| 职责 | 负责的决定或计算 | 代码入口 |
 | --- | --- | --- |
-| 发现 | 允许操作的层和一组真实输入 | 每层的 outlier 分数、阈值、观测行数。允许只出报告。 |
-| 准备候选 | 检出的层，或用户直接指定的层 | 新的通道缩放向量。在同一份留出输入、相同权重上比较新旧 S，记录受益和未受益的层。 |
-| 确认 | 候选、证据和变更前 checkpoint | 用户明确接受或拒绝，也可事先选择按同一验证条件自动接受。 |
-| 应用 | 已接受的候选，或启动配置显式指定的外部 scale 文件 | learner 安装 S，rollout 重建派生权重。每个目标确认同一策略版本后才允许采样。 |
+| 训练编排 | 安排采样、更新和发布，在批次之间触发校准、保存检查点或暂停 | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
+| Ray worker | 各自持有 learner 或 rollout 引擎，接收远程调用，管理进程内资源 | [ray_workers.py](qorerl/runtime/ray_workers.py) |
+| 后端引擎 | Megatron / Transformer Engine 执行训练并导出权重，vLLM 安装权重并生成回答 | [Megatron learner](qorerl/engines/megatron.py) · [vLLM rollout](qorerl/engines/vllm.py) |
+| 精度 recipe | 选择目标层，定义数值变换和需要保存的状态，在后端实现对应算子 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [后端适配](qorerl/recipes/) |
+| 观测 | Recipe Insights 在采集到的操作数上重放固定方案，记录逐层误差和耗时，供用户比较 | [Recipe Insights](docs/recipe-insights.zh-CN.md) |
+| 任务、算法与数据 | 定义任务和奖励，计算优势与 loss，校验轨迹并构造模型输入 | [任务](qorerl/training/tasks.py) · [目标函数](qorerl/training/objective.py) · [轨迹协议](qorerl/training/contracts.py) · [批处理](qorerl/training/batching.py) |
 
-训练编排决定何时采样、准备和发布。recipe 决定如何拟合与检验；worker 负责实际变换、refit 和确认。初版在同步 rollout 批之间操作，以成功的 optimizer 更新数触发周期。在途数据、异步同步、多 recipe 切换是另外的设计问题。具体配置、证据与恢复命令见[动态 SmoothQuant 指南](docs/recipes/dynamic-smoothquant.zh-CN.md)。
+例如，给 SmoothQuant 增加一种估计 S 的方法，拟合与验证逻辑属于 recipe。何时暂停采样、恢复后向哪些副本发布，仍由编排端决定。这样可以分别修改数值方法和训练时序。
 
-## 9. 已实现、待验证与历史材料
+## 3. 只换 S，为什么还要重新发布？
 
-- 已实现：Ray 同步 GRPO，Megatron/vLLM adapter，明确区分的 CPU 测试引擎，版本发布、完整组校验、同配置 checkpoint/resume；选定 MLP down projection 的原生 MXFP8 与固定 Hadamard 实验 recipe，可选局部前向观测和报告页面；动态 SmoothQuant 的独立发现、候选比较、确认与协同发布。
-- 本地测试范围：真实 CPU Ray 进程及优化器更新、算法语义、失败时不确认 refit、恢复一致性、Hadamard 等价性与梯度、recipe 身份/状态。native adapter 使用显式 CPU stub 检验调用、padding、参数坐标和失败边界，不冒充 GPU 执行。
-- 待验证：原生 NVIDIA GPU BF16/MXFP8/Hadamard/SmoothQuant 执行、两端 log-prob 与 refit 数值结果、原生恢复行为、学习收益和成本。
-- 未实现：通用告警暂停控制器、跨 recipe 恢复、多 rank、MoE、异步训练、自动自适应。
+假设第 7 层的权重 W 刚刚同步。此时用户接受了新的 S。learner 下次计算这层时，会用新的 S 对输入做 `X / S`，对权重的对应列做 `W * S`，然后量化。vLLM 则已经缓存了按**旧 S** 缩放、量化和重排的权重。要让下批采样也执行用户选定的方案，vLLM 必须同步新的 S 并重建缓存，即使 W 的数值完全相同。
 
-运行汇总区分 `native_gpu_executed`（执行事实）与 `native_gpu_acceptance`（当前不自动判定验收）。选择 native backend 并结束循环，不代表质量、有效更新或 refit 的验收全部通过。
+![动态 SmoothQuant 的校准与发布。到达校准周期时，可以只做发现，也可以为指定层准备候选。启动时已有 S 则可以直接导入。接受候选后，两端应用新 S，所有 rollout 确认版本才开始下一批采样。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)
 
-早期 tiny-MoE 校准源码、独立 CLI 与旧测试已退出当前代码树。[历史负面结果](docs/experiments/2026-11-08/README.md) 保留为归档，能从固定 Git 提交恢复；当前 CPU GRU 工程测试和 Ray 验证记录继续保留。后续研究重新接入时，需要按当前 recipe 与证据标准组织。
+**候选需要什么证据？** 默认每跨过 20 次实际优化器更新，learner 在同步批边界用更新后的权重重放刚训练的轨迹前缀。校准证据写入 `calibration.jsonl`。图中的 CPU 示例有两层都检出了 outlier。在相同的留出输入上，换 S 后，第 0 层相对同层 BF16 输出的误差从 7.82% 降至 4.79%，第 1 层却从 3.31% 升至 3.86%。因此只有第 0 层进入候选。这些证据回答的是该层的前向数值问题，训练奖励和端到端成本需要另外实测。[候选比较与 CPU 示例](docs/recipes/dynamic-smoothquant.zh-CN.md)
+
+**批准的是哪一次变更？** 产生候选后，编排端先保存变更前的 learner、优化器和 recipe 状态，并把候选及证据与这个检查点绑定。人工模式暂停训练，用户恢复时按候选 ID 接受或拒绝这份变更。拒绝后沿用原 S。自动模式应用满足预设条件的候选。[确认与恢复实现](qorerl/runtime/calibration.py)
+
+**如何知道下一批用的是新方案？** 每批轨迹记录 `PolicyVersion(weight_version, recipe_id)`。前者记录训练批的权重发布代次。对于动态 SmoothQuant，后者还标识 recipe 规格和当前各层 S 的内容摘要。只换 S 时，权重代次保持原值，策略版本仍会改变。learner 保留原坐标系的模型参数和优化器状态，发布权重与新的 recipe 状态。所有 rollout 重建缓存并确认预期版本后，编排端才放行采样。安装失败则停止本次运行，保留故障记录和最近的完整恢复点。[版本标识](qorerl/recipes/state.py) · [加载与确认](qorerl/engines/vllm.py)
+
+## 4. 今天可以依赖到什么程度
+
+| 状态 | 范围 |
+| --- | --- |
+| 本地已验证 | CPU Ray 多进程测试覆盖同步 GRPO、策略版本发布、SmoothQuant 候选的接受与拒绝，以及从检查点继续训练。示例中的量化数字来自 CPU 模拟。[流程测试](tests/test_calibration_workflow.py) |
+| 原生代码已实现，GPU 待验收 | 首个后端组合是单 rank dense Qwen3、Megatron / TE 和 vLLM，覆盖 BF16 基线及选定 MLP 输出投影的直接 MXFP8、固定 Hadamard 和动态 SmoothQuant。GPU 上的实际执行、refit 后同一 token 的训推概率差异、学习效果和成本均待测量。[运行与验收指南](docs/ray-grpo.zh-CN.md) |
+| 后续工作 | 当前可从检查点确认的变更限于 SmoothQuant 候选。通用告警后的跨 recipe 调整、多 rank、MoE、异步训练，以及根据训练反馈自动选择修复方案，列入[开发计划](todo.md)。 |
