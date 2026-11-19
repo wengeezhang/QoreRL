@@ -20,6 +20,7 @@
 - [x] 实现限定 MLP down projection 的原生 MXFP8 训练/导出/rollout 路径，以及固定 Hadamard 对照；明确 Fprop、Dgrad、Wgrad 精度，其他层保持 BF16。
 - [x] 定义首组 recipe 规格、包含选项的身份、固定 signs/target 状态及同配置恢复检查。SmoothQuant 已增加按内容版本化的动态 scales。
 - [x] 在启动时验证首组 recipe 的模型、形状、硬件/后端支持条件，不静默 fallback。
+- [ ] 用同一份权重和输入在原生 GPU 上验收 NVFP4 的 Fprop、Dgrad、Wgrad、候选校准与发布。记录 refit 两端数值、checkpoint 恢复、收益和开销。
 - [ ] 在 GPU 跑算子 probe 和三组 GRPO 配置，确认非零实际更新、refit 和恢复；检查 native quantizer 之间的数值差异。
 - [ ] 为每个 recipe 给出来源、复现配置、测试工作负载、数值结果、训练质量、显存与端到端成本；报告无收益和失败的情况。
 - [x] 保留 canonical 权重，refit 后重建 vLLM 旋转/量化/kernel layout 缓存，失败时不确认版本；实际 GPU 执行结果检查仍待完成。

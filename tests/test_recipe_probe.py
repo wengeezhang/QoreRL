@@ -56,7 +56,7 @@ def test_defaults_disabled_and_native_only_configuration():
     assert cfg.to_dict()["recipe_observation"] == {}
     assert TrainConfig(recipe_id=MXFP8_MLP, recipe_observation={"enabled": True}).observation.enabled
     with pytest.raises(ValueError, match="native Megatron MXFP8"):
-        TrainConfig(recipe_observation={"enabled": True})
+        TrainConfig(recipe_id="bf16-baseline-v1", recipe_observation={"enabled": True})
     with pytest.raises(ValueError, match="no CPU fallback"):
         TrainConfig(
             learner_backend="torch_test",
@@ -246,13 +246,12 @@ def test_current_hadamard_transform_identity_is_retained():
     assert row["recipe_id"] == recipe.identity and row["layer"] == 3 and row["num_layers"] == 5
 
 
-def test_megatron_adapter_captures_canonical_operands_before_active_rotation(monkeypatch):
+def test_megatron_adapter_captures_canonical_operands_before_active_rotation():
     recipe = resolve_recipe(MXFP8_HADAMARD, {"block_size": 32, "seed": 9})
     module = torch.nn.Linear(64, 32, bias=False)
     x = torch.randn(3, 64, requires_grad=True)
     state = RecipeState(recipe)
     name = state.add_target(0, module.weight)
-    installation = megatron_mxfp8.MegatronMXFP8Installation(state, {"backend": "test_stub"})
     captured, executed = [], []
 
     def capture(target, inputs, weight):
@@ -266,8 +265,8 @@ def test_megatron_adapter_captures_canonical_operands_before_active_rotation(mon
         executed.append(1)
         return torch.nn.functional.linear(inputs, weight)
 
+    installation = megatron_mxfp8.MegatronRecipeInstallation(state, {"backend": "test_stub"}, native_stub)
     installation.observer = SimpleNamespace(capture=capture)
-    monkeypatch.setattr(megatron_mxfp8, "native_mxfp8_linear", native_stub)
     output, bias = installation.forward(module, x, name)
     output.sum().backward()
     assert bias is None and executed == [1] and installation.calls[name] == 1

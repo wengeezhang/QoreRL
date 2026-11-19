@@ -1,6 +1,7 @@
 """CPU contract tests with stub kernels; these do not validate native GPU MXFP8."""
 
 import copy
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -54,8 +55,8 @@ def stub_runtime(monkeypatch):
         scales = torch.ones(value.shape[0], value.shape[1] // 32, dtype=torch.uint8)
         return value.to(torch.float8_e4m3fn), scales
 
-    backend = adapter._Backend(_Kernel, SimpleNamespace, quantize, _Linear, _Unquantized, {})
-    monkeypatch.setattr(adapter, "_load_backend", lambda: backend)
+    backend = adapter._MXFP8Backend(_Kernel, SimpleNamespace, quantize, _Linear, _Unquantized, {})
+    monkeypatch.setattr(adapter, "_load_mxfp8_backend", lambda: backend)
     monkeypatch.setattr(adapter, "_validate_weight", lambda weight, name: None)
     model = torch.nn.Module()
     model.config = SimpleNamespace(model_type="qwen3", num_hidden_layers=2)
@@ -141,11 +142,11 @@ def test_rejects_partial_install_and_repeated_install(stub_runtime):
 def test_native_backend_rejects_unsupported_version_and_cpu(monkeypatch):
     monkeypatch.setattr(adapter, "version", lambda name: "0.29.0")
     with pytest.raises(RuntimeError, match="targets vLLM 0.32.0"):
-        adapter._load_backend()
+        adapter._load_mxfp8_backend()
     monkeypatch.setattr(adapter, "version", lambda name: "0.32.0" if name == "vllm" else "0.7.0.post1")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     with pytest.raises(RuntimeError, match="no CPU/ROCm fallback"):
-        adapter._load_backend()
+        adapter._load_mxfp8_backend()
 
 
 @pytest.mark.parametrize("stage", ["load", "empty", "coverage", "refresh", "sync"])
@@ -302,15 +303,19 @@ def test_smoothquant_worker_refit_verifies_identity_and_rebuilds_effective_weigh
         target.quant_method.apply(target, x)
 
 
-def test_worker_quantizes_only_active_layers_and_publishes_promoted_scope(stub_runtime, monkeypatch):
+def test_worker_preserves_quantized_base_across_smoothquant_expansion(stub_runtime, monkeypatch):
     model, quantized = stub_runtime
     model.model.layers.append(copy.deepcopy(model.model.layers[0]))
     model.config.num_hidden_layers = len(model.model.layers)
-    recipe = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1], "allow_layer_expansion": True})
+    recipe = resolve_recipe(
+        MXFP8_SMOOTHQUANT,
+        {"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True},
+    )
     target = model.model.layers[0].mlp.down_proj
-    original_method = target.quant_method
+    outside = model.model.layers[2].mlp.down_proj
+    bf16_method = outside.quant_method
     installed = adapter.install(model, recipe)
-    candidate_method, initial_method, inactive_method = installed.methods
+    candidate_method, initial_method = installed.methods
     promoted, initial = candidate_method.name, initial_method.name
     extension = WeightLoaderExtension()
     extension.model_runner = SimpleNamespace(model=model)
@@ -321,49 +326,95 @@ def test_worker_quantizes_only_active_layers_and_publishes_promoted_scope(stub_r
     source = adapter.RecipeState(recipe)
     source.add_target(0, target.weight, active=False)
     source.add_target(1, initial_method.layer.weight)
-    source.add_target(2, inactive_method.layer.weight, active=False)
     x = torch.randn(2, 128, dtype=torch.bfloat16)
-    bias = torch.randn(128, dtype=torch.bfloat16)
 
-    assert len(quantized) == 1 and candidate_method.carrier is None
-    scanned = []
-    monkeypatch.setattr(adapter, "_validate_weight", lambda weight, name: scanned.append(name))
+    assert len(quantized) == 2 and candidate_method.carrier is not None
+    torch.testing.assert_close(quantized[0], target.weight, rtol=0, atol=0)
+    assert outside.quant_method is bf16_method
+    assert set(installed.state.scales) == {initial}
     assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
         source.active_identity
     )
-    assert scanned == [initial]
-    assert len(quantized) == 2 and candidate_method.carrier is None
-    torch.testing.assert_close(
-        candidate_method.apply(target, x, bias), original_method.apply(target, x, bias)
-    )
-    assert candidate_method.apply_calls == 0
+    candidate_method.apply(target, x)
+    torch.testing.assert_close(candidate_method.kernel.last_input, x, rtol=0, atol=0)
     initial_method.apply(initial_method.layer, x)
     report = extension.qorerl_execution_report()
-    assert report["all_targets_executed"] and list(report["targets"]) == [initial]
-    assert [target["canonical_weight"] for target in report["runtime_targets"]] == [initial]
+    assert report["all_targets_executed"] and set(report["targets"]) == {initial, promoted}
+    assert [entry["canonical_weight"] for entry in report["runtime_targets"]] == [promoted, initial]
 
     new_scale = torch.linspace(0.25, 2, 128)
     source.install_scales({**source.scales, promoted: new_scale})
-    scanned.clear()
     assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
         source.active_identity
     )
-    assert scanned == [promoted, initial]
-    assert installed.state.active_identity == source.active_identity and len(quantized) == 4
-    assert inactive_method.carrier is None
-    torch.testing.assert_close(
-        inactive_method.apply(inactive_method.layer, x),
-        torch.nn.functional.linear(x, inactive_method.layer.weight),
-    )
+    assert installed.state.active_identity == source.active_identity and len(quantized) == 6
+    assert outside.quant_method is bf16_method
     torch.testing.assert_close(quantized[-2], (target.weight * new_scale).bfloat16(), rtol=0, atol=0)
     torch.testing.assert_close(target.weight, tensors[promoted], rtol=0, atol=0)
     assert not installed.report()["all_targets_executed"]
     candidate_method.apply(target, x)
     initial_method.apply(initial_method.layer, x)
     torch.testing.assert_close(candidate_method.kernel.last_input, (x / new_scale).bfloat16(), rtol=0, atol=0)
+    assert [entry["apply_calls"] for entry in installed.report()["runtime_targets"]] == [1, 1]
+
+
+def test_nvfp4_refit_packs_weights_once_and_serves_nvfp4_without_flashinfer(stub_runtime, monkeypatch):
+    from qorerl.recipes import te_nvfp4
+
+    model, mxfp8_calls = stub_runtime
+    monkeypatch.setattr(adapter, "_load_mxfp8_backend", lambda: pytest.fail("NVFP4 selected MXFP8"))
+    monkeypatch.setattr(adapter, "version", {"vllm": "0.32.0"}.__getitem__)
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.layers.linear",
+        SimpleNamespace(RowParallelLinear=_Linear, UnquantizedLinearMethod=_Unquantized),
+    )
+    monkeypatch.setattr(te_nvfp4, "validate_native_nvfp4", lambda: {"backend": "te_nvfp4_stub"})
+    packed_weights, consumed = [], []
+
+    def pack(weight):
+        packed = SimpleNamespace(weight=weight.detach().clone())
+        packed_weights.append(packed)
+        return packed
+
+    def linear(x, packed, bias):
+        consumed.append((x.detach().clone(), packed))
+        output = torch.nn.functional.linear(x, packed.weight)
+        return output if bias is None else output + bias
+
+    monkeypatch.setattr(te_nvfp4, "pack_nvfp4_weight", pack)
+    monkeypatch.setattr(te_nvfp4, "nvfp4_linear_from_packed", linear)
+    monkeypatch.setattr(te_nvfp4, "nvfp4_packed_nbytes", lambda _: 8224)
+    recipe = resolve_recipe(
+        "smoothquant-mlp-down-v1",
+        {"precision": "nvfp4", "layers": [1], "smoothquant_layers": [], "allow_layer_expansion": True},
+    )
+    installed = adapter.install(model, recipe)
+    (method,) = installed.methods
+    target = method.layer
+    outside = model.model.layers[0].mlp.down_proj
+    assert isinstance(outside.quant_method, _Unquantized)
+    x = torch.randn(2, 3, 128, dtype=torch.bfloat16)
+    bias = torch.randn(128, dtype=torch.bfloat16)
+    for _ in range(2):
+        actual = method.apply(target, x, bias)
+        torch.testing.assert_close(actual, torch.nn.functional.linear(x, target.weight) + bias)
+    assert len(packed_weights) == 1 and [c[1] for c in consumed] == [method.carrier, method.carrier]
+    torch.testing.assert_close(packed_weights[0].weight, target.weight)
+    torch.testing.assert_close(consumed[0][0], x)
+
+    scale = torch.linspace(0.5, 2, 128)
+    installed.state.install_scales({method.name: scale})
+    assert not installed.ready
+    installed.refresh()
+    method.apply(target, x)
+    assert len(packed_weights) == 2 and consumed[-1][1] is packed_weights[1]
+    torch.testing.assert_close(packed_weights[1].weight, (target.weight * scale).bfloat16())
+    torch.testing.assert_close(consumed[-1][0], (x / scale).bfloat16())
     report = installed.report()
-    assert report["all_targets_executed"] and set(report["targets"]) == {initial, promoted}
-    assert [entry["apply_calls"] for entry in report["runtime_targets"]] == [1, 1]
+    assert report["backend"] == "vllm_transformer_engine_native_nvfp4"
+    assert report["runtime_targets"][0]["cache_bytes"] == 8224 and report["all_targets_executed"]
+    assert not mxfp8_calls
 
 
 def test_smoothquant_rollout_requires_worker_ack_of_exact_scale_identity(stub_runtime):

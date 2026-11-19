@@ -59,7 +59,7 @@ class VLLMRollout:
 
         self.cfg, self.policy_version = cfg, None
         worker_options = {"worker_extension_cls": "qorerl.engines.vllm.WeightLoaderExtension"}
-        if cfg.recipe.is_mxfp8:
+        if cfg.recipe.is_low_precision:
             worker_options = {
                 "worker_cls": "qorerl.engines.vllm_worker.QoreRLRecipeWorker",
                 "additional_config": {

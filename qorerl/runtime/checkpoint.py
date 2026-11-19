@@ -53,7 +53,7 @@ def resume_metadata(path, cfg):
     schema = metadata.get("schema")
     if schema not in (1, 2):
         raise ValueError("Unsupported checkpoint schema")
-    previous = TrainConfig(**metadata["config"])
+    previous = TrainConfig(**{"recipe_id": "bf16-baseline-v1", **metadata["config"]})
     allowed = {
         "steps",
         "checkpoint_every",
@@ -62,7 +62,14 @@ def resume_metadata(path, cfg):
         "rollout_runtime_env",
         "recipe_observation",  # Diagnostics neither change the recipe nor its learned state.
     }
-    changed = [k for k, v in cfg.to_dict().items() if k not in allowed and previous.to_dict()[k] != v]
+    previous_config = previous.to_dict()
+    changed = [
+        key
+        for key, value in cfg.to_dict().items()
+        if key not in allowed | {"recipe_id", "recipe_options"} and previous_config[key] != value
+    ]
+    if previous.policy_recipe_id != cfg.policy_recipe_id:
+        changed.append("recipe_id" if previous.recipe.name != cfg.recipe.name else "recipe_options")
     if changed:
         raise ValueError(f"Resume currently requires identical training semantics; changed: {changed}")
     key = "policy" if schema == 1 else "policy_version"
@@ -73,6 +80,10 @@ def resume_metadata(path, cfg):
             re.fullmatch(re.escape(cfg.policy_recipe_id) + r":[0-9a-f]{64}", policy_version.recipe_id)
             is not None
         )
+    if not valid_recipe:
+        raise ValueError(
+            "Checkpoint policy recipe differs from the configured recipe or uses an incompatible scope"
+        )
     step = metadata["step"]
     if (
         type(step) is not int
@@ -80,7 +91,6 @@ def resume_metadata(path, cfg):
         or cfg.steps < step
         or (cfg.steps == step and not metadata.get("pending_candidate"))
         or policy_version.weight_version != step
-        or not valid_recipe
     ):
         raise ValueError(
             "Resume requires a consistent checkpoint and remaining steps or a final pending review"

@@ -14,9 +14,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from qorerl.recipes import te_mxfp8 as native
+from qorerl.recipes import te_block_linear as native
 from qorerl.recipes.spec import MXFP8_SMOOTHQUANT, resolve_recipe
 from qorerl.recipes.state import RecipeState
+from qorerl.recipes.te_mxfp8 import native_mxfp8_linear, validate_native_mxfp8
 
 
 @pytest.fixture(autouse=True)
@@ -52,7 +53,7 @@ def identity_backend(monkeypatch):
         return (left.float() @ right.float()).to(out_dtype), None, None, None
 
     backend = native._Backend("mock", IdentityQuantizer, "mock_e4m3", gemm, None)
-    monkeypatch.setattr(native, "_load_backend", lambda: backend)
+    monkeypatch.setattr(native, "_load_backend", lambda *args: backend)
     return SimpleNamespace(quantized=quantized, calls=calls)
 
 
@@ -66,7 +67,7 @@ def test_identity_backend_padding_forward_and_gradients_match_linear(identity_ba
     expected_x = x.detach().clone().requires_grad_()
     expected_weight = weight.detach().clone().requires_grad_()
     expected = F.linear(expected_x, expected_weight)
-    actual = native._NativeMXFP8Linear.apply(x, weight)
+    actual = native._NativeBlockLinear.apply(x, weight, native._load_backend())
     upstream = torch.randn(actual.shape, generator=generator).bfloat16()
 
     rows = x.numel() // x.shape[-1]
@@ -102,7 +103,7 @@ def test_identity_backend_padding_forward_and_gradients_match_linear(identity_ba
 def test_identity_backend_only_computes_requested_gradients(identity_backend, input_grad, weight_grad):
     x = torch.ones(3, 64, dtype=torch.bfloat16, requires_grad=input_grad)
     weight = torch.ones(32, 64, dtype=torch.bfloat16, requires_grad=weight_grad)
-    native._NativeMXFP8Linear.apply(x, weight).sum().backward()
+    native._NativeBlockLinear.apply(x, weight, native._load_backend()).sum().backward()
     assert [call[0] for call in identity_backend.calls] == ["TN", "NN" if input_grad else "NT"]
     if input_grad:
         torch.testing.assert_close(x.grad, torch.full_like(x, 32))
@@ -126,7 +127,7 @@ def test_identity_backend_operands_use_autograd_saved_tensor_hooks(identity_back
     x = torch.ones(3, 64, dtype=torch.bfloat16, requires_grad=True)
     weight = torch.ones(32, 64, dtype=torch.bfloat16, requires_grad=True)
     with torch.autograd.graph.saved_tensors_hooks(pack, unpack):
-        output = native._NativeMXFP8Linear.apply(x, weight)
+        output = native._NativeBlockLinear.apply(x, weight, native._load_backend())
     output.sum().backward()
     assert packed == unpacked == [torch.Size([32, 64]), torch.Size([32, 64])]
     torch.testing.assert_close(x.grad, torch.full_like(x, 32))
@@ -141,13 +142,13 @@ def test_cpu_request_fails_without_attempting_te_import(monkeypatch):
 
     monkeypatch.setattr(native, "_load_backend", unexpected_import)
     with pytest.raises(RuntimeError, match="no CPU fallback"):
-        native.validate_native_mxfp8()
+        validate_native_mxfp8()
 
 
 def test_explicit_cpu_device_rejected_even_on_a_cuda_host(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     with pytest.raises(RuntimeError, match="requires a CUDA device"):
-        native.validate_native_mxfp8("cpu")
+        validate_native_mxfp8("cpu")
 
 
 @pytest.mark.parametrize("te_version", ["2.7.0", "2.17.0", "2.19.0", "3.0.0", "unknown"])
@@ -185,7 +186,7 @@ def test_old_workspace_gemm_abi_is_rejected(monkeypatch):
 
 @pytest.mark.parametrize("capability", [(9, 0), (12, 0), (12, 1)])
 def test_all_layout_capability_guard_rejects_unsupported_architectures(monkeypatch, capability):
-    monkeypatch.setattr(native, "_load_backend", lambda: SimpleNamespace(version="2.18.0"))
+    monkeypatch.setattr(native, "_load_backend", lambda *args: SimpleNamespace(version="2.18.0"))
     monkeypatch.setattr(torch.cuda, "device", lambda index: nullcontext())
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index: capability)
     with pytest.raises(RuntimeError, match="requires SM10 or SM11"):
@@ -194,7 +195,7 @@ def test_all_layout_capability_guard_rejects_unsupported_architectures(monkeypat
 
 def test_te_availability_reason_is_preserved(monkeypatch):
     backend = SimpleNamespace(version="2.18.0", available=lambda **kwargs: (False, "test unavailable"))
-    monkeypatch.setattr(native, "_load_backend", lambda: backend)
+    monkeypatch.setattr(native, "_load_backend", lambda *args: backend)
     monkeypatch.setattr(torch.cuda, "device", lambda index: nullcontext())
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index: (10, 0))
     with pytest.raises(RuntimeError, match="Native MXFP8 is unavailable: test unavailable"):
@@ -214,7 +215,7 @@ def _require_native_cuda():
         pytest.skip(f"Native MXFP8 test requires TE 2.18.x, found {te_version}")
     # Once the declared GPU/package prerequisites are present, extension/ABI
     # failures are real failures, not silently converted into test skips.
-    native.validate_native_mxfp8()
+    validate_native_mxfp8()
 
 
 @pytest.mark.parametrize("rows", [1, 31, 33])
@@ -227,7 +228,7 @@ def test_native_cuda_saved_mxfp8_operands_and_all_three_gemms(rows):
     x_ref = x.detach().clone().requires_grad_()
     weight_ref = weight.detach().clone().requires_grad_()
     expected = F.linear(x_ref, weight_ref)
-    actual = native.native_mxfp8_linear(x, weight)
+    actual = native_mxfp8_linear(x, weight)
 
     # Check the actual saved TE tensor objects, and independently evaluate the
     # forward GEMM from their dequantized operands. This is stronger than only
@@ -272,8 +273,8 @@ def test_native_cuda_smoothquant_maps_te_gradients_to_canonical_operands():
     # Independent leaf operands expose the raw BF16 gradients of the same MXFP8 GEMMs.
     x_effective = (x.detach().float() / scale).bfloat16().requires_grad_()
     w_effective = (weight.detach().float() * scale).bfloat16().requires_grad_()
-    reference = native.native_mxfp8_linear(x_effective, w_effective)
-    actual = native.native_mxfp8_linear(state.transform_input(x, name), state.transform_weight(weight, name))
+    reference = native_mxfp8_linear(x_effective, w_effective)
+    actual = native_mxfp8_linear(state.transform_input(x, name), state.transform_weight(weight, name))
     dy = torch.randn(actual.shape, generator=generator, device="cuda", dtype=torch.bfloat16)
     reference.backward(dy)
     actual.backward(dy)

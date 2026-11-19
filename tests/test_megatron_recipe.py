@@ -269,22 +269,17 @@ def test_smoothquant_routes_unscaled_capture_and_maps_both_gradients(megatron_st
     torch.testing.assert_close(target.weight, before, rtol=0, atol=0)
 
 
-def test_expandable_recipe_captures_bf16_then_restores_promoted_execution(megatron_stubs):
+def test_smoothquant_expansion_and_resume_keep_base_quantized(megatron_stubs):
     cfg = TrainConfig(
-        recipe_id=MXFP8_SMOOTHQUANT, recipe_options={"layers": [1], "allow_layer_expansion": True}
+        recipe_id=MXFP8_SMOOTHQUANT,
+        recipe_options={"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True},
     )
     model = GPTModel()
+    model.decoder.layers.append(copy.deepcopy(model.decoder.layers[0]))
     layer = model.decoder.layers[0].mlp.linear_fc2
-    original_forward = layer.forward
-    bf16_calls = []
-
-    def bf16(x):
-        bf16_calls.append(x.detach().clone())
-        return original_forward(x)
-
-    layer.forward = bf16
+    outside = model.decoder.layers[2].mlp.linear_fc2
     learner = MegatronLearner.__new__(MegatronLearner)
-    installation = learner.recipe_installation = adapter.install(model, cfg.recipe, num_layers=2)
+    installation = learner.recipe_installation = adapter.install(model, cfg.recipe, num_layers=3)
     learner.recipe_state = installation.state
     learner.setup_optimizer(cfg, model, 0, "cpu")
     learner.logits = lambda ids: model(F.one_hot(ids, 64).bfloat16())
@@ -295,10 +290,12 @@ def test_expandable_recipe_captures_bf16_then_restores_promoted_execution(megatr
     trajectory = Trajectory(0, 0, (1, 3), (2,), (-1.0,), "", "stop", initial_policy)
 
     samples = learner._sample_calibration_inputs([trajectory], 2)
-    assert set(samples) == {initial, promoted}
-    assert len(bf16_calls) == len(megatron_stubs.calls) == 1
-    torch.testing.assert_close(samples[promoted], bf16_calls[0].reshape(2, 64), rtol=0, atol=0)
-    assert installation.report()["calls"] == {initial: 1}
+    assert set(samples) == {initial, promoted} and len(megatron_stubs.calls) == 2
+    raw_x, raw_w = megatron_stubs.calls[0]
+    torch.testing.assert_close(samples[promoted], raw_x.reshape(2, 64), rtol=0, atol=0)
+    torch.testing.assert_close(raw_w, layer.weight, rtol=0, atol=0)
+    assert installation.report()["calls"] == {promoted: 1, initial: 1}
+    assert outside.forward.__func__ is TERowParallelLinear.forward
     scale = torch.linspace(0.5, 2, 64)
     promoted_policy = learner.apply_calibration({promoted: scale})
     assert promoted_policy.weight_version == initial_policy.weight_version
@@ -307,20 +304,56 @@ def test_expandable_recipe_captures_bf16_then_restores_promoted_execution(megatr
     x = torch.randn(2, 64, dtype=torch.bfloat16, requires_grad=True)
     for checkpoint, active in [(initial_checkpoint, False), (promoted_checkpoint, True)]:
         learner.restore(checkpoint)
-        bf16_calls.clear()
         megatron_stubs.calls.clear()
         layer.zero_grad()
         layer(x)[0].float().sum().backward()
         assert layer.weight.grad is not None
         assert learner.recipe_state.is_active(promoted) == active
-        if active:
-            assert not bf16_calls and len(megatron_stubs.calls) == 1
-            effective_x, effective_w = megatron_stubs.calls[0]
-            torch.testing.assert_close(effective_x, (x / scale).bfloat16(), rtol=0, atol=0)
-            torch.testing.assert_close(effective_w, (layer.weight * scale).bfloat16(), rtol=0, atol=0)
-        else:
-            assert len(bf16_calls) == 1 and not megatron_stubs.calls
+        assert len(megatron_stubs.calls) == 1
+        effective_x, effective_w = megatron_stubs.calls[0]
+        torch.testing.assert_close(effective_x, (x / scale).bfloat16() if active else x, rtol=0, atol=0)
+        torch.testing.assert_close(
+            effective_w, (layer.weight * scale).bfloat16() if active else layer.weight, rtol=0, atol=0
+        )
+        assert outside.forward.__func__ is TERowParallelLinear.forward
         torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+
+
+def test_nvfp4_dispatch_and_calibration_share_the_selected_kernel(megatron_stubs, monkeypatch):
+    from qorerl.recipes import te_nvfp4
+
+    cfg = TrainConfig(
+        recipe_id="smoothquant-mlp-down-v1",
+        recipe_options={"precision": "nvfp4", "layers": [0, 1], "smoothquant_layers": [1]},
+    )
+    monkeypatch.setattr(
+        adapter, "validate_native_mxfp8", lambda: pytest.fail("NVFP4 loaded the MXFP8 backend")
+    )
+    monkeypatch.setattr(te_nvfp4, "validate_native_nvfp4", lambda: {"backend": "te_nvfp4_stub"})
+    calls = []
+
+    def nvfp4_linear(x, weight):
+        calls.append((x.detach().clone(), weight.detach().clone()))
+        return F.linear(x, weight)
+
+    monkeypatch.setattr(te_nvfp4, "native_nvfp4_linear", nvfp4_linear)
+    model = GPTModel()
+    installed = adapter.install(model, cfg.recipe, num_layers=2)
+    assert installed.linear is nvfp4_linear  # Native calibration probes reuse the actual FPROP.
+    smooth = down_proj_name(1)
+    scale = torch.linspace(0.5, 2, 64)
+    installed.state.install_scales({smooth: scale})
+    direct_layer, smooth_layer = [layer.mlp.linear_fc2 for layer in model.decoder.layers]
+    x = torch.randn(2, 64, dtype=torch.bfloat16)
+    direct_layer(x)[0].sum().backward()
+    smooth_layer(x)[0].sum().backward()
+    assert not megatron_stubs.calls
+    assert len(calls) == 2 and direct_layer.weight.grad is not None and smooth_layer.weight.grad is not None
+    torch.testing.assert_close(calls[0][0], x, rtol=0, atol=0)
+    torch.testing.assert_close(calls[0][1], direct_layer.weight, rtol=0, atol=0)
+    torch.testing.assert_close(calls[1][0], (x / scale).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(calls[1][1], (smooth_layer.weight * scale).bfloat16(), rtol=0, atol=0)
+    assert installed.report()["fprop"] == installed.report()["wgrad"] == "nvfp4_e2m1"
 
 
 @pytest.mark.parametrize(

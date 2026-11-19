@@ -1,10 +1,10 @@
 # 在训练中更新 SmoothQuant 的通道缩放
 
-QoreRL 允许用户指定在哪些 MLP down projection 上使用 MXFP8，以及何时校准、由谁批准和何时启用新的通道缩放 S。第一版覆盖单 rank dense Qwen3 的 Megatron/TE learner 和 vLLM rollout。本地 CPU 流程已经运行，原生 GPU 的执行、开销和训练效果待验证。原始 SmoothQuant 研究的是离线校准的 INT8 推理；这里将通道缩放用于训练期的 MXFP8。[原文](https://arxiv.org/abs/2211.10438)
+用户先选定哪些层的 `mlp.down_proj` 用低精度计算，再决定其中哪些层启用 SmoothQuant、何时重新校准、由谁批准新的通道缩放 S。本文以默认的 MXFP8 为例，实验性的 NVFP4 路径沿用相同的选层和校准规则。第一版覆盖单 rank dense Qwen3 的 Megatron/TE learner 和 vLLM rollout。原始 SmoothQuant 研究离线校准的 INT8 推理，QoreRL 将通道缩放用于训练期间。本地 CPU 已验证校准与发布流程，原生 GPU 的执行、开销和训练效果待验证。[原文](https://arxiv.org/abs/2211.10438)
 
 ## 选择从哪一步开始
 
-涉及修改 S 的入口使用 `mxfp8-smoothquant-mlp-down-v1`。单独发现也可以在原生 BF16、直接 MXFP8、固定 Hadamard 上运行，保持原计算方式。BF16 检查全部 down projection。固定范围的 MXFP8 recipe 检查 `recipe_options.layers` 选定的层（层号从 0 开始）。动态 SmoothQuant 开启扩层后，校准时检查所有 decoder 的 MLP down projection。阶段开关填在 `recipe_calibration` 中。
+选 `smoothquant-mlp-down-v1` 后，先用 `recipe_options.layers` 指定固定的低精度范围，再用 `smoothquant_layers` 指定哪些低精度层初始启用 SmoothQuant。层号从 0 开始，两份名单都针对 `mlp.down_proj`。省略前者会选全部支持的层，省略后者会在全部已选层叠加 S。显式传入 `smoothquant_layers: []` 可从直接 MXFP8 起步，配合 `allow_layer_expansion: true` 等待候选。已有的 BF16 或固定 Hadamard 方案也可以单独打开诊断。下面的校准开关均位于 `recipe_calibration` 中。
 
 | 我手里有什么 | 设置 | 到期时发生什么 |
 | --- | --- | --- |
@@ -15,41 +15,45 @@ QoreRL 允许用户指定在哪些 MLP down projection 上使用 MXFP8，以及�
 
 `refresh_every_optimizer_steps` 默认 20。一次 rollout 批可能有多个更新 epoch，也可能由于全零优势跳过更新。程序按实际完成的 optimizer 更新数计数，在跨过指定间隔后的第一个同步批边界校准一次。恢复后的计数从 checkpoint 延续。周期校准默认 `approval: "manual"`；`"auto"` 表示事先同意应用在下述留出数据上满足条件的候选。显式指定外部文件表示用户已选择这组 scale。
 
-例如，使用 BF16 训练时，在配置中加入 `"recipe_calibration": {"discovery_only": true, "refresh_every_optimizer_steps": 20}`，即可在更新数达到周期时将报告写入 `calibration.jsonl`。已有 BF16 激活张量时，也可以独立调用 `qorerl.recipes.calibration.outlier_report(samples, CalibrationConfig(discovery_only=True))`。其中 `samples` 把层名映射到形如 [token 数, 输入通道数] 的 BF16 张量。单独发现使用全部采集行。
+例如，显式选择 `recipe_id: "bf16-baseline-v1"` 时，在配置中加入 `"recipe_calibration": {"discovery_only": true, "refresh_every_optimizer_steps": 20}`，即可在更新数达到周期时将报告写入 `calibration.jsonl`。已有 BF16 激活张量时，也可以独立调用 `qorerl.recipes.calibration.outlier_report(samples, CalibrationConfig(discovery_only=True))`。其中 `samples` 把层名映射到形如 [token 数, 输入通道数] 的 BF16 张量。单独发现使用全部采集行。
 
 ## 它拿什么来决定换 S
 
 1. learner 在刚完成更新的权重上，重放刚训练的轨迹前缀，收集所选层在变换前的输入 X。按前缀去重，排除 padding，每层最多保留 `max_rows` 行（默认 128）。输入行的前半用于拟合，后半留作比较。两个集合仍可能来自同一条回答。
 2. 每个输入通道 j 取拟合行上的最大绝对值 `x_max[j]`。发现分数为这些通道最大值中的最大值除以它们的平均值。默认阈值为 4。这个分数描述同一层内通道幅度的不均衡。
 3. 对入选层取权重第 j 列的绝对值最大值 `w_max[j]`，计算 `S[j] = x_max[j]^alpha / w_max[j]^(1-alpha)`，默认 alpha 为 0.5。前向用 `X/S` 和 `W*S` 做配套变换，W 的存储形状为 [out, in]。未观测到有效信号的通道沿用原 scale。新 S 是相对原始参数的绝对缩放，刷新时替换指定层的旧值。
-4. 对已经启用的层，在相同的留出行和权重上，分别用当前 S 和候选 S 做 MXFP8 前向，与该层原始 BF16 线性投影比较相对 L2 误差。只有候选误差**严格下降**，且相对降幅达到 `min_relative_improvement`（默认 0），该层才进入候选。各层分别比较，文件中保留未入选的原因。多层同时应用的误差、训推 log-prob、奖励与端到端成本还需要另行评估。
+4. 对每层取同一份留出激活和权重，计算 BF16 参考输出，再分别运行当前配置和候选 S 的 MXFP8 前向。相对 L2 误差是两份输出之差的 L2 范数除以 BF16 输出的 L2 范数。只有候选误差严格下降，且相对降幅达到 `min_relative_improvement`（默认 0），才提议变更。一次 outlier 命中可以走到拟合，也可能在留出比较时被淘汰。
 
-这个比较让使用者分清两件事。一层可能具有明显 outlier，同时当前 MXFP8 的输出比候选缩放更接近 BF16。发现阶段可以选中它，准备阶段仍可保留原配置。
+## 只在低精度范围内扩大 SmoothQuant 覆盖
 
-## 只在发现 outlier 后扩大范围
-
-以下是可合并到[原生训练配置](../../configs/grpo_dynamic_smoothquant.json)的字段。首批只有第 7、19 层的 `down_proj` 使用 MXFP8 + SmoothQuant。每跨过 20 次优化器更新，learner 在同一轮校准中也采集其他 BF16 `down_proj` 的输入。
+[原生训练配置](../../configs/grpo_dynamic_smoothquant.json) 的关键字段如下。四层 `down_proj` 自首批起都运行 MXFP8，其中三层已有 S。每跨过 20 次优化器更新，learner 采集这四层的输入。
 
 ```json
 {
-  "recipe_id": "mxfp8-smoothquant-mlp-down-v1",
-  "recipe_options": {"layers": [7, 19], "allow_layer_expansion": true},
+  "recipe_id": "smoothquant-mlp-down-v1",
+  "recipe_options": {
+    "precision": "mxfp8",
+    "layers": [7, 15, 20, 25],
+    "smoothquant_layers": [7, 15, 20],
+    "allow_layer_expansion": true
+  },
   "recipe_calibration": {
     "refresh_every_optimizer_steps": 20,
+    "discover_outliers": true,
     "approval": "manual",
     "max_activation_relative_l2": 0.05
   }
 }
 ```
 
-在 `calibration.jsonl` 的逐层证据中，`action` 区分两类评估。
+`calibration.jsonl` 中的 `action` 给出每层的比较对象。
 
-| action | 这层当前怎么执行 | 怎样读证据 |
-| --- | --- | --- |
-| `refresh` | MXFP8 + 当前 S | 比较当前与候选 S 相对同一 BF16 输出的误差；只有达到降幅条件才提议刷新。 |
-| `activate` | BF16 | 新层始终要先发现 outlier，再比较直接 MXFP8（`direct_mxfp8_relative_l2`）及配上候选 S 后的误差（`candidate_relative_l2`）。上例要求后者 ≤ 0.05，即相对 L2 误差不超过 5%。 |
+| action | 例子 | 当前执行方式 | 候选通过条件 |
+| --- | --- | --- | --- |
+| `refresh` | 第 7、15、20 层 | MXFP8 + 旧 S | 新 S 比旧 S 的误差低，且达到要求的相对降幅。 |
+| `activate` | 第 25 层 | 直接 MXFP8 | 先发现 outlier。候选 S 必须比直接 MXFP8 误差低，达到要求的相对降幅，且通过首次启用误差上限（如果设置）。 |
 
-5% 是这个示例选用的容许值，默认配置不设上限。两种试算和参考值使用同一份留出输入和同一份权重。实际训练与采样仍沿用上一版本，直到批准并向所有 rollout 发布新版本。选择 `auto` 会自动应用合格候选。完整的第 23 层例子见[设计文档](../../design.md#扩层特例第-23-层什么时候离开-bf16)。
+这里的 0.05 将**首次启用**后的相对 L2 误差限制在 5% 以内。默认不设上限。第 25 层获批并发布后，从下一批开始使用 MXFP8 + SmoothQuant。其余 BF16 层从观察到发布都不在此次变更范围内。[逐批行为](../../design.md#smoothquant-expansion)
 
 ## 在 CPU 上走完一次人工确认
 
@@ -80,7 +84,7 @@ uv run qorerl train --config configs/grpo_cpu_smoothquant.json \
 
 ## 导入已有 scale
 
-外部工具需提供每个目标层一个有限、严格为正的 FP32 向量，长度等于该层的输入通道数。启动导入只允许覆盖初始选定层，可只提供其中一部分。之前按相同模型版本和相同初始层做的固定范围校准，也可以作为扩层运行的起点。初始层中未提供 S 的默认全 1，范围外仍走 BF16。下例将校准工具已经生成的 `scales` 字典封装为可导入 JSON：
+外部工具为每个提供的目标层生成一个有限、严格为正的 FP32 向量，长度等于该层的输入通道数。启动导入仅接收初始 `smoothquant_layers` 内的条目，可以只提供其中一部分。缺省的初始 S 填 1；低精度范围内其余层直接运行 MXFP8，范围外走 BF16。下例将已校准的 `scales` 封装为可导入 JSON。
 
 ```python
 import json
@@ -108,4 +112,4 @@ Path("configs/scales.json").write_text(json.dumps(artifact))
 uv run qorerl train --config configs/grpo_dynamic_smoothquant.json --out runs/sq-native
 ```
 
-[原生配置](../../configs/grpo_dynamic_smoothquant.json) 以第 7、19 层为例，需要支持原生 MXFP8 的 Megatron/TE 与 vLLM 环境。安装前提沿用 [MXFP8 指南](mxfp8-hadamard.zh-CN.md)。该 recipe 的校准证据写入 `calibration.jsonl`，包含当前 S 和候选 S 的实际比较。GPU 验收还需要检查两端相同 token 的 log-prob、refit 后输出、学习曲线、校准额外显存及耗时。vLLM 启动时只为初始启用层建立量化权重缓存，后续扩层和重建缓存的峰值显存需要单独预留和测量。
+[原生配置](../../configs/grpo_dynamic_smoothquant.json) 需要支持原生 MXFP8 的 Megatron/TE 与 vLLM 环境。安装前提见 [MXFP8 指南](mxfp8-hadamard.zh-CN.md)。vLLM 从启动起为整个低精度范围建立量化权重缓存，发布 S 时让生效层使用匹配的权重与缩放。GPU 验收要检查两端相同 token 的 log-prob、refit 后输出、学习曲线和校准开销。如需 NVFP4，在同一通用 recipe 下将 `precision` 改为 `"nvfp4"`。NVFP4 路径要求两端都安装 Transformer Engine 2.18.x，并使用支持该内核的 SM10.x GPU。learner 和 vLLM worker 都用 TE 的 NVFP4 量化与 GEMM；vLLM 在权重发布后缓存已打包的权重。候选比较也使用 NVFP4 对照。两种格式的原生 GPU 执行与端到端效果均待验证，CPU 流程示例只模拟 MXFP8。[训练与打包实现](../../qorerl/recipes/te_nvfp4.py)

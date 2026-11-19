@@ -18,7 +18,7 @@ def down_proj_name(index):
 
 def scale_digest(scales):
     """SHA-256 of sorted target names and their length-framed little-endian FP32 vectors."""
-    if not isinstance(scales, dict) or not scales or any(not isinstance(name, str) for name in scales):
+    if not isinstance(scales, dict) or any(not isinstance(name, str) for name in scales):
         raise ValueError("SmoothQuant requires named scale vectors")
     digest = hashlib.sha256(b"qorerl.smoothquant.scales.v1\x00")
     for name, value in sorted(scales.items()):
@@ -86,14 +86,22 @@ class RecipeState:
     def is_active(self, name):
         return name in (self._scales if self.spec.uses_smoothquant else self.targets)
 
-    def add_target(self, index, weight, *, active=True):
+    def add_target(self, index, weight, *, active=None):
         name = down_proj_name(index)
         if name in self.targets:
             raise ValueError(f"Duplicate recipe target: {name}")
-        if not active and not self.spec.allow_layer_expansion:
-            raise ValueError("Inactive targets require SmoothQuant layer expansion")
+        if self.spec.layers is not None and index not in self.spec.layers:
+            raise ValueError(f"Target outside configured low-precision layers: {name}")
+        initial = self.spec.smoothquant_layers
+        expected = initial is None or index in initial
+        if active is not None and active != expected:
+            raise ValueError(f"Initial SmoothQuant activation disagrees with recipe: {name}")
+        active = expected
         if weight.ndim != 2 or any(dim <= 0 or dim % 32 for dim in weight.shape):
-            raise ValueError(f"MXFP8 target dimensions must be multiples of 32: {name} {weight.shape}")
+            raise ValueError(
+                f"{self.spec.precision.upper()} target dimensions must be multiples of 32: "
+                f"{name} {weight.shape}"
+            )
         if self.spec.uses_hadamard:
             if weight.shape[1] % self.spec.hadamard_block_size:
                 raise ValueError(f"Hadamard block_size does not divide input channels: {name}")
@@ -107,10 +115,11 @@ class RecipeState:
         return name
 
     def _check_scales(self, scales):
+        eligible = self.targets.keys() if self.spec.allow_layer_expansion else self._initial_scale_targets
         if (
             not self.spec.uses_smoothquant
             or not isinstance(scales, dict)
-            or not self._initial_scale_targets <= scales.keys() <= self.targets.keys()
+            or not self._initial_scale_targets <= scales.keys() <= eligible
         ):
             raise ValueError(
                 "SmoothQuant scales must cover every initial target and stay within eligible targets"
@@ -139,12 +148,12 @@ class RecipeState:
         return self._transforms[name].apply(value)
 
     def transform_input(self, value, name):
-        if self.spec.uses_smoothquant:
+        if name in self._scales:
             return smooth_input(value, self._scale_for(name, value.device))
         return self.rotate(value, name)
 
     def transform_weight(self, value, name):
-        if self.spec.uses_smoothquant:
+        if name in self._scales:
             return smooth_weight(value, self._scale_for(name, value.device))
         return self.rotate(value, name)
 
@@ -202,14 +211,16 @@ class RecipeState:
         report = {
             **self.spec.to_dict(),
             "identity": self.active_identity,
-            "targets": {
-                name: list(shape) for name, shape in sorted(self.targets.items()) if self.is_active(name)
-            },
+            "targets": {name: list(shape) for name, shape in sorted(self.targets.items())},
             "validation": "experimental_gpu_validation_pending",
             "other_operators": "bf16_baseline",
         }
         if self.spec.uses_smoothquant:
-            report.update(scale_digest=self.scale_digest, preset_identity=self.spec.identity)
+            report.update(
+                smoothquant_targets=sorted(self._scales),
+                scale_digest=self.scale_digest,
+                preset_identity=self.spec.identity,
+            )
         if self.spec.allow_layer_expansion:
             report["eligible_targets"] = sorted(self.targets)
         return report

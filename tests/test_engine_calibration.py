@@ -56,7 +56,7 @@ def assert_same_checkpoint(a, b):
 
 @pytest.mark.parametrize("expand", [False, True], ids=["refresh", "first-activation"])
 def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_training(expand):
-    options = {"layers": [1], "allow_layer_expansion": True} if expand else {}
+    options = {"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True} if expand else {}
     cfg = replace(fixture_config(), recipe_options=options)
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
     rollout.install_weights(learner.export_weights())
@@ -72,7 +72,18 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
         for model in (learner.model, rollout.model):
             projection = model.model.layers[0].mlp
             bf16 = F.linear(x * projection.gain, projection.down_proj.weight)
-            torch.testing.assert_close(projection(x, name, model.installation), bf16, rtol=0, atol=0)
+            direct = learner.recipe_installation.linear(x * projection.gain, projection.down_proj.weight)
+            torch.testing.assert_close(projection(x, name, model.installation), direct, rtol=0, atol=0)
+            assert not torch.equal(direct, bf16)
+            protected = model.model.layers[2].mlp
+            torch.testing.assert_close(
+                protected(x, down_proj_name(2), model.installation),
+                F.linear(x * protected.gain, protected.down_proj.weight),
+                rtol=0,
+                atol=0,
+            )
+        with pytest.raises(ValueError, match="eligible"):
+            learner.apply_calibration({down_proj_name(2): torch.ones(32)})
     proposals, evidence = learner.prepare_calibration(batch)
     assert name in proposals and down_proj_name(2) not in proposals
     assert {event["target"] for event in evidence} == set(learner.recipe_state.targets)
@@ -81,8 +92,9 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
             assert event["candidate_relative_l2"] < event["current_relative_l2"]
     if expand:
         activation = next(event for event in evidence if event["target"] == name)
-        assert activation["current_relative_l2"] == 0
-        assert activation["candidate_relative_l2"] > 0
+        assert activation["current_relative_l2"] == activation["direct_low_precision_relative_l2"]
+        assert 0 < activation["candidate_relative_l2"] < activation["current_relative_l2"]
+        assert down_proj_name(2) not in {event["target"] for event in evidence}
     assert_same_checkpoint(checkpoint_state(learner), before)
 
     ids = torch.tensor([[1, 4, 3]])
@@ -100,14 +112,24 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
             projection = model.model.layers[0].mlp
             state = model.installation.state
             activation = x * projection.gain
-            expected_projection = learner.calibration_fprop(
+            expected_projection = learner.recipe_installation.linear(
                 state.transform_input(activation, name),
                 state.transform_weight(projection.down_proj.weight, name),
             )
             torch.testing.assert_close(
                 projection(x, name, model.installation), expected_projection, rtol=0, atol=0
             )
-            assert not torch.equal(expected_projection, F.linear(activation, projection.down_proj.weight))
+            assert not torch.equal(
+                expected_projection,
+                learner.recipe_installation.linear(activation, projection.down_proj.weight),
+            )
+            protected = model.model.layers[2].mlp
+            torch.testing.assert_close(
+                protected(x, down_proj_name(2), model.installation),
+                F.linear(x * protected.gain, protected.down_proj.weight),
+                rtol=0,
+                atol=0,
+            )
     assert not torch.equal(rollout.model(ids), logits_before)
     torch.testing.assert_close(rollout.model(ids), learner.logits(ids), rtol=0, atol=0)
     with pytest.raises(ValueError, match="increase"):
@@ -122,6 +144,46 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
     assert learner.update(next_batch) == restored.update(next_batch)
     assert learner.policy_version.recipe_id == approved.recipe_id
     assert_same_checkpoint(checkpoint_state(learner), checkpoint_state(restored))
+
+
+@pytest.mark.parametrize("discovery_only", [False, True], ids=["proposals", "discovery"])
+def test_fixed_overlay_observes_and_modifies_only_its_initial_subset(discovery_only):
+    cfg = replace(
+        fixture_config(),
+        recipe_options={"layers": [0, 1], "smoothquant_layers": [1]},
+        recipe_calibration={"refresh_every_optimizer_steps": 1, "discovery_only": discovery_only},
+    )
+    learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
+    original = rollout.install_weights(learner.export_weights())
+    _, evidence = learner.prepare_calibration(sample(cfg, rollout, 1))
+    assert [event["target"] for event in evidence] == [down_proj_name(1)]
+    for index in (0, 2):
+        with pytest.raises(ValueError):
+            learner.apply_calibration({down_proj_name(index): torch.ones(32)})
+    assert learner.policy_version == original
+
+
+@pytest.mark.parametrize("expand", [False, True])
+def test_empty_initial_overlay_is_direct_until_a_candidate_is_approved(expand):
+    cfg = replace(
+        fixture_config(),
+        recipe_options={"layers": [0, 1], "smoothquant_layers": [], "allow_layer_expansion": expand},
+    )
+    learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
+    rollout.install_weights(learner.export_weights())
+    batch = sample(cfg, rollout, 1)
+    if not expand:
+        learner.logits = lambda *_: pytest.fail("Empty observation scope triggered a forward pass")
+    proposals, evidence = learner.prepare_calibration(batch)
+    assert not learner.recipe_state.scales
+    if expand:
+        assert all(event["action"] == "activate" for event in evidence)
+        assert down_proj_name(0) in proposals
+        learner.apply_calibration(proposals)
+        rollout.install_weights(learner.export_weights())
+        assert set(rollout.model.installation.state.scales) == set(proposals)
+    else:
+        assert (proposals, evidence) == ({}, [])
 
 
 def test_prefix_capture_excludes_duplicate_contexts_and_obeys_bound():

@@ -64,6 +64,8 @@ class _CalibrationInputs:
         self.seen.clear()
 
     def capture(self, name, x):
+        if name not in self.rows:
+            return
         if name in self.seen or x.numel() != self.length * x.shape[-1]:
             raise ValueError(f"Calibration expected one unpadded token row per position for {name}")
         self.seen.add(name)
@@ -113,7 +115,13 @@ class SingleRankGRPOLearner:
 
                     cleanup.callback(module.register_forward_pre_hook(hook).remove)
             else:
-                capture = _CalibrationInputs(installation.weights)
+                state = self.recipe_state
+                observed = installation.weights
+                if state.spec.uses_smoothquant and not state.spec.allow_layer_expansion:
+                    observed = [name for name in observed if state.is_active(name)]
+                if not observed:
+                    return {}
+                capture = _CalibrationInputs(observed)
                 cleanup.callback(setattr, installation, "calibrator", installation.calibrator)
                 installation.calibrator = capture
             for tokens, shared in _calibration_prefixes(trajectories, max_rows):
@@ -140,14 +148,16 @@ class SingleRankGRPOLearner:
         ):
             raise ValueError("Calibration requires a nonempty rollout batch with consistent policy identity")
         samples = self._sample_calibration_inputs(batch.trajectories, config.max_rows)
+        if not samples:
+            return {}, []
         if config.discovery_only:
             return {}, outlier_report(samples, config)
         return prepare(
-            self.recipe_installation.weights,
+            {name: self.recipe_installation.weights[name] for name in samples},
             samples,
             self.recipe_state.scales,
             config,
-            fprop=getattr(self, "calibration_fprop", None),
+            fprop=self.recipe_installation.linear,
             allow_layer_expansion=self.cfg.recipe.allow_layer_expansion,
         )
 

@@ -32,9 +32,14 @@ def cluster():
 
 @pytest.mark.parametrize("expand", [False, True], ids=["fixed-scope", "first-activation"])
 def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cluster, expand):
-    options = {"layers": [1], "allow_layer_expansion": True} if expand else {"layers": [0, 1, 2]}
+    options = (
+        {"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True}
+        if expand
+        else {"layers": [0, 1, 2]}
+    )
     cfg = replace(TrainConfig.load(CONFIG), steps=2, recipe_options=options)
-    initial_targets = {down_proj_name(index) for index in options["layers"]}
+    base = {down_proj_name(index) for index in options["layers"]}
+    initial_overlay = {down_proj_name(1)} if expand else base
     candidate_target = down_proj_name(0)
     paused = run_sync_grpo(replace(cfg, steps=1), tmp_path / "paused")
     assert paused["status"] == "awaiting_review" and paused["last_step"] == 1
@@ -45,11 +50,15 @@ def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cl
     assert evidence[candidate_target]["status"] == "proposed"
     existing = evidence[down_proj_name(1)]
     assert existing["action"] == "refresh" and existing["status"] == "no_gain"
-    assert evidence[down_proj_name(2)]["status"] == "not_selected"
+    if expand:
+        assert set(evidence) == base
+    else:
+        assert evidence[down_proj_name(2)]["status"] == "not_selected"
     assert set(review["scale_artifact"]["scales"]) == {candidate_target}
     assert len(paused["execution"]) == cfg.rollout_workers + 1
     for worker in paused["execution"]:
-        assert set(worker["targets"]) == initial_targets
+        assert set(worker["targets"]) == base
+        assert set(worker["smoothquant_targets"]) == initial_overlay
         assert worker["identity"] == paused["policy_version"]["recipe_id"]
         if expand:
             assert set(worker["eligible_targets"]) == set(evidence)
@@ -77,7 +86,8 @@ def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cl
     assert new_policy["weight_version"] == paused["policy_version"]["weight_version"]
     assert new_policy["recipe_id"] != paused["policy_version"]["recipe_id"]
     for worker in accepted["execution"]:
-        assert set(worker["targets"]) == initial_targets | {candidate_target}
+        assert set(worker["targets"]) == base
+        assert set(worker["smoothquant_targets"]) == initial_overlay | {candidate_target}
         assert worker["identity"] == accepted["policy_version"]["recipe_id"]
     next_batch = events(tmp_path / "accepted/trajectories.jsonl")[0]
     assert all(t["policy_version"] == new_policy for t in next_batch["trajectories"])

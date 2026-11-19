@@ -65,7 +65,7 @@ class MegatronLearner(SingleRankGRPOLearner):
             raise ValueError("This adapter implements one Megatron rank, not pipeline parallel training")
         self.bridge.load_hf_weights(self.modules)
         self.recipe_installation = None
-        if cfg.recipe.is_mxfp8:
+        if cfg.recipe.is_low_precision:
             from qorerl.recipes.megatron_mxfp8 import install
 
             self.recipe_installation = install(self.modules[0], cfg.recipe, hf_config.num_hidden_layers)

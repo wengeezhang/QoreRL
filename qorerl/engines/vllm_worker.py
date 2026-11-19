@@ -4,8 +4,7 @@ Install before vLLM profiles memory and allocates its KV cache. vLLM 0.32
 measures persistent consumption from the change in free device memory, so the
 derived weights and cached GPU signs are counted without adjusting its earlier
 model_memory_usage snapshot. The inference profile measures activation scratch;
-refit scratch, overlapping caches and carriers for subsequently promoted layers
-still require headroom.
+refit scratch and overlapping old and new weight carriers still require headroom.
 """
 
 from vllm.v1.worker.gpu_worker import Worker

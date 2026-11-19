@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1040" viewBox="0 0 1024 1040" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
   <title id="title">动态 SmoothQuant 的校准与发布流程</title>
-  <desc id="desc">每批先采样、更新并沿用当前缩放发布权重。跨过校准周期后，在更新后的权重上重放本批前缀。可以只发现异常、为已知层直接拟合候选，或在启动时导入已有缩放。候选须在留出输入上通过同层 BF16 参考比较；有候选才保存变更前的检查点，按配置人工或自动确认。learner 安装新缩放，全部 rollout 重建并确认版本后才开始采样。</desc>
+  <desc id="desc">每批先采样、更新并沿用当前缩放发布权重。固定低精度层范围，跨过校准周期后在本批前缀上检查该范围内获准的层。可以只发现异常、为已知层直接拟合候选，或在启动时导入已有缩放。直接 MXFP8 层可提议首次加入缩放，已平滑的层可提议刷新。候选须在留出输入上通过同层 BF16 参考比较；有候选才保存变更前的检查点，按配置人工或自动确认。learner 安装新缩放，全部 rollout 重建并确认版本后才开始采样。</desc>
   <defs>
     <style>
       text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #142e38; }
@@ -28,7 +28,7 @@
   <path d="M140 30v21" class="rule"/>
   <text x="158" y="47" class="small">同步 GRPO 训练架构</text>
   <text x="42" y="103" class="title">动态 SmoothQuant 的校准与发布</text>
-  <text x="44" y="139" class="body">S 是每个输入通道的缩放系数，控制选定层如何执行 MXFP8 计算。</text>
+  <text x="44" y="139" class="body">先选哪些层运行 MXFP8，再决定哪些层使用通道缩放 S。</text>
 
   <!-- The normal publish completes before calibration is considered. -->
   <rect x="40" y="168" width="944" height="92" rx="14" fill="#123944"/>
@@ -65,7 +65,7 @@
   <circle cx="68" cy="342" r="17" fill="#13776c"/>
   <text x="68" y="348" class="number">1</text>
   <text x="104" y="350" class="stage">发现异常通道</text>
-  <text x="104" y="383" class="body">用更新后的权重重放本批前缀，检查目标层输入。</text>
+  <text x="104" y="383" class="body">重放本批前缀，采集获准校准的 MXFP8 层输入。</text>
   <path d="M553 348h36" class="route" marker-end="url(#forward)"/>
   <text x="611" y="349" class="label">只想做诊断？</text>
   <text x="611" y="381" class="body">写出各层 outlier 分数，沿用当前 S。</text>
@@ -73,15 +73,15 @@
   <circle cx="68" cy="461" r="17" fill="#13776c"/>
   <text x="68" y="467" class="number">2</text>
   <text x="104" y="469" class="stage">拟合并验证候选 S</text>
-  <text x="104" y="505" class="body">用部分输入拟合 S，用留出的输入比较新旧 S。</text>
-  <text x="104" y="536" class="body">误差以同一层的 BF16 输出为基准。</text>
+  <text x="104" y="505" class="body">用部分输入拟合 S，在留出输入上检验改进。</text>
+  <text x="104" y="536" class="body">当前方案为直接 MXFP8 或 MXFP8 + 旧 S。</text>
   <path d="M132 566H87" class="enter" marker-end="url(#entry)"/>
   <text x="146" y="571" class="small" style="fill:#634e9e">已知要调哪些层？从拟合开始</text>
 
   <rect x="582" y="437" width="397" height="151" rx="12" fill="#eef5f3"/>
   <text x="602" y="465" class="label">CPU 示例 · 局部前向相对误差</text>
   <text x="602" y="495" class="small">目标层</text>
-  <text x="696" y="495" class="small">当前 S → 候选 S</text>
+  <text x="696" y="495" class="small">当前 → 候选 S</text>
   <path d="M602 506h357" class="rule"/>
   <text x="603" y="532" class="label">层 0</text>
   <text x="696" y="532" class="mono" font-size="18">7.82% → 4.79%</text>

@@ -29,7 +29,7 @@ def test_megatron_output_keeps_batch_sequence_and_removes_vocab_padding():
 
 def test_vllm_publication_failure_does_not_acknowledge_version():
     rollout = VLLMRollout.__new__(VLLMRollout)
-    rollout.cfg = TrainConfig()
+    rollout.cfg = TrainConfig(recipe_id="bf16-baseline-v1")
     rollout.policy_version = PolicyVersion(0, rollout.cfg.recipe_id)
 
     def fail(*args, **kwargs):

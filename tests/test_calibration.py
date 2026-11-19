@@ -281,7 +281,7 @@ def test_first_activation_measures_both_quantized_paths_against_the_same_heldout
     weights.update({quiet: object(), inactive: weights[NAME].detach().clone()})
     samples.update({quiet: torch.ones_like(samples[NAME]), inactive: samples[NAME].clone()})
     samples[quiet][-1, 0] = 1024  # A held-out outlier cannot authorize activation.
-    cfg = CalibrationConfig(discover_outliers=False, outlier_threshold=2, min_relative_improvement=1)
+    cfg = CalibrationConfig(discover_outliers=False, outlier_threshold=2)
     calls = []
 
     def clipped(x, w):
@@ -291,21 +291,24 @@ def test_first_activation_measures_both_quantized_paths_against_the_same_heldout
     overrides, reports = prepare(weights, samples, scales, cfg, fprop=clipped, allow_layer_expansion=True)
     assert [r["target"] for r in reports] == sorted(weights)
     refresh, activation, skipped = reports
-    assert (refresh["action"], refresh["selection"], refresh["status"]) == ("refresh", "explicit", "no_gain")
+    assert (refresh["action"], refresh["selection"], refresh["status"]) == ("refresh", "explicit", "proposed")
     assert (skipped["action"], skipped["selection"], skipped["status"]) == (
         "activate",
         "outlier",
         "not_selected",
     )
-    assert skipped["direct_mxfp8_relative_l2"] is None
+    assert skipped["direct_low_precision_relative_l2"] is None
     assert (activation["action"], activation["selection"], activation["status"]) == (
         "activate",
         "outlier",
         "proposed",
     )
-    assert activation["current_relative_l2"] == 0 and activation["relative_improvement"] is None
+    assert activation["current_relative_l2"] == activation["direct_low_precision_relative_l2"]
+    assert activation["relative_improvement"] == pytest.approx(
+        1 - activation["candidate_relative_l2"] / activation["current_relative_l2"]
+    )
     assert activation["max_activation_relative_l2"] is None
-    assert list(overrides) == [inactive]
+    assert set(overrides) == {NAME, inactive}
     torch.testing.assert_close(overrides[inactive], torch.tensor([4.0, 1.0, 1.0]))
     assert len(calls) == 4
     heldout = samples[inactive][2:]
@@ -313,21 +316,21 @@ def test_first_activation_measures_both_quantized_paths_against_the_same_heldout
     for (x, w), s, field in zip(
         calls[2:],
         [torch.ones(3), overrides[inactive]],
-        ["direct_mxfp8_relative_l2", "candidate_relative_l2"],
+        ["direct_low_precision_relative_l2", "candidate_relative_l2"],
         strict=True,
     ):
         torch.testing.assert_close(x, (heldout / s).bfloat16())
         torch.testing.assert_close(w, (weights[inactive] * s).bfloat16())
         output = F.linear(x.clamp(-4, 4), w).double()
         assert activation[field] == pytest.approx(((output - reference).norm() / reference.norm()).item())
-    assert 0 < activation["candidate_relative_l2"] < activation["direct_mxfp8_relative_l2"]
+    assert 0 < activation["candidate_relative_l2"] < activation["direct_low_precision_relative_l2"]
     assert list(scales) == [NAME] and scales[NAME].tolist() == [2, 1, 2]
 
 
 def test_first_activation_uses_optional_inclusive_bf16_error_bound():
     weights, samples, scales = _operands()
     weights[OTHER], samples[OTHER] = weights[NAME], samples[NAME]
-    cfg = CalibrationConfig(outlier_threshold=2, min_relative_improvement=1)
+    cfg = CalibrationConfig(outlier_threshold=2)
 
     def evaluate(bound):
         overrides, [_, event] = prepare(
@@ -336,12 +339,12 @@ def test_first_activation_uses_optional_inclusive_bf16_error_bound():
             scales,
             replace(cfg, max_activation_relative_l2=bound),
             allow_layer_expansion=True,
-            fprop=lambda x, w: F.linear(x, w.clamp_max(2)),
+            fprop=lambda x, w: F.linear(x.clamp(-4, 4), w),
         )
         return overrides, event
 
     accepted, first = evaluate(None)
-    assert OTHER in accepted and first["direct_mxfp8_relative_l2"] == 0
+    assert OTHER in accepted and first["direct_low_precision_relative_l2"] > 0
     cost = first["candidate_relative_l2"]
     assert cost > 0
     at_bound, event = evaluate(cost)
@@ -351,7 +354,26 @@ def test_first_activation_uses_optional_inclusive_bf16_error_bound():
     assert event["candidate_relative_l2"] == cost
 
 
-def test_identity_scale_is_a_precision_change_only_for_an_inactive_target():
+@pytest.mark.parametrize("adverse", [False, True], ids=["gain_below_threshold", "worse_than_direct"])
+def test_expansion_rejects_insufficient_gain_over_current_low_precision(adverse):
+    weights, samples, scales = _operands()
+    weights[OTHER], samples[OTHER] = weights[NAME], samples[NAME]
+    cfg = CalibrationConfig(outlier_threshold=2, min_relative_improvement=1)
+
+    def fprop(x, w):
+        if adverse:
+            return F.linear(x, w.clamp_max(2))
+        return F.linear(x.clamp(-4, 4), w)
+
+    overrides, [_, event] = prepare(weights, samples, scales, cfg, allow_layer_expansion=True, fprop=fprop)
+    assert OTHER not in overrides and event["status"] == "no_gain"
+    if adverse:
+        assert event["candidate_relative_l2"] > event["current_relative_l2"]
+    else:
+        assert 0 < event["relative_improvement"] < 1
+
+
+def test_identity_scale_never_proposes_a_transform():
     weights, samples, _ = _operands()
     weights[OTHER], samples[OTHER] = weights[NAME], samples[NAME]
     scales = {NAME: torch.ones(3)}
@@ -359,9 +381,8 @@ def test_identity_scale_is_a_precision_change_only_for_an_inactive_target():
     overrides, [refresh, activation] = prepare(
         weights, samples, scales, cfg, allow_layer_expansion=True, fprop=F.linear
     )
-    assert refresh["status"] == "no_gain" and activation["status"] == "proposed"
-    assert list(overrides) == [OTHER]
-    torch.testing.assert_close(overrides[OTHER], scales[NAME])
+    assert refresh["status"] == activation["status"] == "no_gain"
+    assert not overrides
 
 
 def test_expansion_requires_an_authorized_observation_scope_and_active_subset():
@@ -370,9 +391,10 @@ def test_expansion_requires_an_authorized_observation_scope_and_active_subset():
     cfg = CalibrationConfig()
     with pytest.raises(ValueError, match="entire supplied calibration scope"):
         prepare(weights, samples, scales, cfg)
-    for invalid in ({}, {down_proj_name(23): torch.ones(3)}):
-        with pytest.raises(ValueError, match="nonempty subset"):
-            prepare(weights, samples, invalid, cfg, allow_layer_expansion=True)
+    with pytest.raises(ValueError, match="subset"):
+        prepare(weights, samples, {down_proj_name(23): torch.ones(3)}, cfg, allow_layer_expansion=True)
+    overrides, reports = prepare(weights, samples, {}, cfg, allow_layer_expansion=True, fprop=F.linear)
+    assert not overrides and all(event["action"] == "activate" for event in reports)
     with pytest.raises(ValueError, match="same nonempty scope"):
         prepare(weights, {NAME: samples[NAME]}, scales, cfg, allow_layer_expansion=True)
     with pytest.raises(ValueError, match="must be boolean"):
@@ -410,4 +432,5 @@ def test_inactive_target_requires_valid_reference_and_both_quantized_trials(inva
         assert event["current_relative_l2"] is None
     else:
         assert calls == (1 if invalid_stage == "direct" else 2)
-        assert event["status"] == "invalid_candidate" and event["current_relative_l2"] == 0
+        assert event["status"] == "invalid_candidate"
+        assert event["current_relative_l2"] == (None if invalid_stage == "direct" else 0)

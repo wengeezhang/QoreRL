@@ -14,39 +14,38 @@ from qorerl.recipes.state import RecipeState
 from qorerl.recipes.te_mxfp8 import native_mxfp8_linear, validate_native_mxfp8
 
 
-class MegatronMXFP8Installation:
-    def __init__(self, state, backend, targets=()):
+class MegatronRecipeInstallation:
+    def __init__(self, state, backend, linear, targets=()):
         self.state, self.backend = state, backend
+        self.linear = linear
         self.calls = {name: 0 for name in state.targets}
         self.observer = None
         self.calibrator = None
         self.weights = {name: module.weight for name, module in targets}
-        self._bf16_forwards = {name: module.forward for name, module in targets}
 
     def forward(self, module, x, name):
         if self.calibrator is not None:
             self.calibrator.capture(name, x)
-        if not self.state.is_active(name):
-            return self._bf16_forwards[name](x)
         if self.observer is not None:
             self.observer.capture(name, x, module.weight)
         self.calls[name] += 1
         x = self.state.transform_input(x, name)
         weight = self.state.transform_weight(module.weight, name)
         # SmoothQuant maps dX_eff to dX_eff/S and dW_eff to dW_eff*S.
-        output = native_mxfp8_linear(x, weight)
+        output = self.linear(x, weight)
         return output, None  # MCore's bias-free TERowParallelLinear contract.
 
     def report(self):
+        operand_format = "nvfp4_e2m1" if self.state.spec.precision == "nvfp4" else "mxfp8_e4m3"
         return {
             **self.state.report(),
             **self.backend,
-            "fprop": "mxfp8_e4m3",
-            "dgrad": "mxfp8_e4m3",
-            "wgrad": "mxfp8_e4m3",
+            "fprop": operand_format,
+            "dgrad": operand_format,
+            "wgrad": operand_format,
             "parameter_export": "canonical_bf16",
             "gradient_return": "bf16_in_canonical_basis",
-            "calls": {name: count for name, count in self.calls.items() if self.state.is_active(name)},
+            "calls": dict(self.calls),
         }
 
 
@@ -59,9 +58,14 @@ def install(model, recipe, num_layers):
     from megatron.core.extensions.transformer_engine import TERowParallelLinear
     from megatron.core.transformer.module import Float16Module
 
-    backend = validate_native_mxfp8()
-    if not recipe.is_mxfp8:
-        raise ValueError("Expected a scoped MXFP8 recipe")
+    if not recipe.is_low_precision:
+        raise ValueError("Expected a scoped low-precision recipe")
+    if recipe.precision == "nvfp4":
+        from qorerl.recipes.te_nvfp4 import native_nvfp4_linear, validate_native_nvfp4
+
+        backend, linear = validate_native_nvfp4(), native_nvfp4_linear
+    else:
+        backend, linear = validate_native_mxfp8(), native_mxfp8_linear
     # Bridge applies this BF16 wrapper independently of wrap_with_ddp=False.
     # Unwrap only the known mixed-precision wrapper for structural inspection;
     # the caller retains it for forward execution and checkpoint handling.
@@ -72,15 +76,15 @@ def install(model, recipe, num_layers):
     config = model.config
     for field in ("tensor_model_parallel_size", "pipeline_model_parallel_size", "context_parallel_size"):
         if getattr(config, field, None) != 1:
-            raise ValueError(f"MLP MXFP8 recipe requires {field}=1")
+            raise ValueError(f"Low-precision MLP recipe requires {field}=1")
     if getattr(config, "sequence_parallel", False) or getattr(config, "num_moe_experts", None):
         raise ValueError("First MLP recipe supports dense, non-sequence-parallel execution only")
     layers = model.decoder.layers
     if len(layers) != num_layers:
         raise ValueError("Expected the complete single-rank decoder layer list")
     state, targets = RecipeState(recipe), []
-    selected = set(recipe.select_layers(num_layers))
-    for index in recipe.eligible_layers(num_layers):
+    selected = recipe.select_layers(num_layers)
+    for index in selected:
         mlp = layers[index].mlp
         module = mlp.linear_fc2
         if type(mlp).__name__ != "MLP" or not isinstance(module, TERowParallelLinear):
@@ -90,8 +94,8 @@ def install(model, recipe, num_layers):
         if getattr(module, "bias", None) is not None:
             raise ValueError("First MLP recipe requires bias-free down projections")
         _validate_native_weight(module.weight)
-        targets.append((state.add_target(index, module.weight, active=index in selected), module))
-    installation = MegatronMXFP8Installation(state, backend, targets)
+        targets.append((state.add_target(index, module.weight), module))
+    installation = MegatronRecipeInstallation(state, backend, linear, targets)
     # Validate every target before changing any execution method.
     for name, module in targets:
 

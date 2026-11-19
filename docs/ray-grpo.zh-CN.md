@@ -1,6 +1,6 @@
 # Ray + Megatron + vLLM：第一条 GRPO 训练链路
 
-这条链路提供 BF16 基线，并接入了首组 [MXFP8 / MXFP8 + 固定 Hadamard 实验 recipe](recipes/mxfp8-hadamard.zh-CN.md)。自动告警后调整 recipe、自动修复尚未实现。
+这条链路默认在选定层执行直接 MXFP8。仓库提供显式 BF16 对照、[直接量化 / 固定 Hadamard](recipes/mxfp8-hadamard.zh-CN.md) 和[动态 SmoothQuant](recipes/dynamic-smoothquant.zh-CN.md) 配置。SmoothQuant 可以按用户授权扩大缩放覆盖，通用自动修复仍是长期目标。
 
 **验证状态：本地 CPU 的真实 Ray 多进程训练已运行；Megatron + vLLM 适配器已实现，但尚未在 NVIDIA GPU 上验证。** CPU 测试不会假装调用这两个 GPU 引擎，也不能证明它们的数值一致性、性能或 API 组合在真实环境中全部可用。
 
@@ -12,7 +12,7 @@
 driver / coordinator：不执行模型 forward，不直接取得完整权重
   │
   ├─ RayLearnerWorker → Megatron Core + Transformer Engine，GPU 0
-  │    load HF → Bridge 转为 Megatron 模型 → 按 recipe 执行前后向（默认 BF16）
+  │    load HF → Bridge 转为 Megatron 模型 → 按 recipe 执行前后向（默认在 mlp.down_proj 上用 MXFP8）
   │    FP32 master parameters / FP32 跨 microbatch 梯度累积 / AdamW states
   │
   └─ RayRolloutWorker → vLLM，GPU 1
@@ -139,7 +139,15 @@ qorerl train --config configs/grpo_megatron_vllm.json --out results/native-basel
 
 如果两端依赖冲突，可分别创建环境，并通过 `learner_runtime_env` / `rollout_runtime_env` 传入 Ray 支持的 runtime-env 设置（例如各自的 `py_executable`）。各节点需有相同的 QoreRL 代码与兼容的 Ray/Python 版本；不同 Python 环境的 native 接入同样属于待验证项。首期建议先在一台双 GPU 机器验证，再扩大集群。
 
-GPU 验收要实际检查：
+### 原生 NVFP4 需要什么
+
+直接量化、固定 Hadamard 与动态 SmoothQuant 分别选 `mlp-down-v1`、`hadamard-mlp-down-v1`、`smoothquant-mlp-down-v1`。在 `recipe_options` 中设 `"precision": "nvfp4"`；层范围、S 的初始子集与审批流程沿用相同配置。例如，把[动态 SmoothQuant 配置](../configs/grpo_dynamic_smoothquant.json)的 `precision` 改为 `nvfp4`，第 25 层就从直接 NVFP4 起步。
+
+两端均需 SM10.x GPU 和 Transformer Engine 2.18.x。learner 对指定投影的前向、Dgrad、Wgrad 使用 TE 原生 GEMM，权重以原始 BF16 坐标导出。vLLM worker 在每次发布时用 TE 将权重打包为 FP4 E2M1 数据、FP8 E4M3 块级 scale 和张量级 scale；推理时对输入执行对应的量化。当前原生实现的权重两个维度均要求是 32 的倍数。本地测试验证了配置和调用逻辑，仍需在真实 GPU 上验收数值、显存和训练效果。[训练 GEMM](../qorerl/recipes/te_block_linear.py) · [NVFP4 打包与推理](../qorerl/recipes/te_nvfp4.py)
+
+GPU 验收还需在相同权重下，将同一 token 放入不同批次，比较 learner 和 rollout 的 log-prob。当前 TE 路径按输入张量计算第二级 scale，拼批改变最大绝对值时，同一 token 的量化结果也可能变化。
+
+### GPU 验收项目
 
 1. 两端加载同一 snapshot 后，在同一组 token 上比较 behavior / training log-prob，检查有限值和差异分布。
 2. 至少完成两次 optimizer update 和后续 refit；确认 optimizer 更新计数大于 0、权重内容改变、新版本产生的 log-prob 对应新权重。只有发布版本增加还不足以证明 refit 生效。
@@ -163,7 +171,7 @@ GPU 验收要实际检查：
 | `qorerl/engines/base.py` | learner/rollout 角色接口 |
 | `qorerl/engines/factory.py` | 延迟加载和选择具体 backend |
 | `qorerl/engines/single_rank_learner.py` | 单 rank GRPO、梯度累积和 FP32 master optimizer |
-| `qorerl/recipes/` | 精度规格/状态、固定 Hadamard、TE 与 vLLM MXFP8 适配、GPU 算子 probe |
+| `qorerl/recipes/` | 精度规格与状态、Hadamard / SmoothQuant、TE 与 vLLM 的低精度适配、GPU 算子 probe |
 
 首期为可核对性选择同步执行、完整 CPU 权重传输、关闭 prefix cache/CUDA graph、保存完整轨迹、普通 padding。它们会带来开销，当前实现不宣称吞吐领先。
 

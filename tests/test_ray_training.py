@@ -73,15 +73,57 @@ def test_resume_rejects_changed_training_semantics(tmp_path):
 def test_resume_accepts_legacy_and_current_metadata(tmp_path, schema):
     cfg = TrainConfig()
     policy = (
-        {"policy": {"weights": 1, "recipe": cfg.recipe_id}}
+        {"policy": {"weights": 1, "recipe": cfg.policy_recipe_id}}
         if schema == 1
-        else {"policy_version": {"weight_version": 1, "recipe_id": cfg.recipe_id}}
+        else {"policy_version": {"weight_version": 1, "recipe_id": cfg.policy_recipe_id}}
     )
     metadata = {"schema": schema, "config": cfg.to_dict(), "step": 1, **policy}
     (tmp_path / "metadata.json").write_text(json.dumps(metadata))
     restored = resume_metadata(tmp_path, cfg)
-    assert restored["policy_version"] == {"weight_version": 1, "recipe_id": cfg.recipe_id}
+    assert restored["policy_version"] == {"weight_version": 1, "recipe_id": cfg.policy_recipe_id}
     assert json.loads((tmp_path / "metadata.json").read_text()) == metadata
+
+
+def test_historical_implicit_bf16_checkpoint_keeps_its_original_format(tmp_path):
+    cfg = TrainConfig(recipe_id="bf16-baseline-v1")
+    config = cfg.to_dict()
+    del config["recipe_id"]
+    metadata = {"schema": 1, "step": 1, "config": config, "policy": {"weights": 1, "recipe": cfg.recipe_id}}
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+    assert resume_metadata(tmp_path, cfg)["step"] == 1
+    with pytest.raises(ValueError, match="recipe_id"):
+        resume_metadata(tmp_path, TrainConfig())
+
+
+def test_resume_rejects_checkpoint_that_could_promote_bf16_layers(tmp_path):
+    cfg = TrainConfig(
+        recipe_id="mxfp8-smoothquant-mlp-down-v1",
+        recipe_options={"layers": [7, 15, 20, 25], "allow_layer_expansion": True},
+    )
+    # Identity emitted by the pre-scope recipe for this exact configuration.
+    old_policy = "mxfp8-smoothquant-mlp-down-v1:18604a217adbe84e:" + "1" * 64
+    metadata = {
+        "schema": 2,
+        "config": cfg.to_dict(),
+        "step": 1,
+        "policy_version": {"weight_version": 1, "recipe_id": old_policy},
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="incompatible scope"):
+        resume_metadata(tmp_path, cfg)
+
+
+def test_resume_accepts_equivalent_spelling_of_low_precision_recipe(tmp_path):
+    old = TrainConfig(recipe_id="mxfp8-mlp-down-v1", recipe_options={"layers": [7, 15]})
+    cfg = replace(old, recipe_id="mlp-down-v1", recipe_options={"layers": [15, 7], "precision": "mxfp8"})
+    metadata = {
+        "schema": 2,
+        "config": old.to_dict(),
+        "step": 1,
+        "policy_version": {"weight_version": 1, "recipe_id": old.policy_recipe_id},
+    }
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+    assert resume_metadata(tmp_path, cfg)["policy_version"]["recipe_id"] == old.policy_recipe_id
 
 
 @pytest.mark.parametrize("fault", ["schema", "version", "recipe"])
@@ -91,7 +133,7 @@ def test_resume_rejects_inconsistent_metadata(tmp_path, fault):
         "schema": 2,
         "config": cfg.to_dict(),
         "step": 1,
-        "policy_version": {"weight_version": 1, "recipe_id": cfg.recipe_id},
+        "policy_version": {"weight_version": 1, "recipe_id": cfg.policy_recipe_id},
     }
     if fault == "schema":
         metadata["schema"] = 999

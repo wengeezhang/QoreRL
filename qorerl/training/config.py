@@ -31,7 +31,7 @@ class TrainConfig:
     gpu_memory_utilization: float = 0.7
     checkpoint_every: int = 5
     rpc_timeout: float = 600.0
-    recipe_id: str = "bf16-baseline-v1"
+    recipe_id: str = "mlp-down-v1"
     recipe_options: dict = field(default_factory=dict)
     recipe_observation: dict = field(default_factory=dict)
     recipe_calibration: dict = field(default_factory=dict)
@@ -71,7 +71,9 @@ class TrainConfig:
                 raise ValueError(
                     "Scale calibration requires the SmoothQuant recipe; native recipes support discovery_only"
                 )
-        if self.is_cpu_test and not (recipe.name == "fp32-test-v1" or recipe.uses_smoothquant):
+        if self.is_cpu_test and not (
+            recipe.name == "fp32-test-v1" or (recipe.is_mxfp8 and recipe.uses_smoothquant)
+        ):
             raise ValueError(
                 "CPU test engines only support fp32-test-v1 and explicit SmoothQuant emulation; "
                 "no native quantization fallback"

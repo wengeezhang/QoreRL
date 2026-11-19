@@ -13,16 +13,17 @@
   "max_model_len": 512,
   "rollout_workers": 1,
   "checkpoint_every": 5,
-  "recipe_id": "mxfp8-smoothquant-mlp-down-v1",
+  "recipe_id": "smoothquant-mlp-down-v1",
   "recipe_options": {
-    "layers": [
-      7,
-      19
-    ]
+    "precision": "mxfp8",
+    "layers": [7, 15, 20, 25],
+    "smoothquant_layers": [7, 15, 20],
+    "allow_layer_expansion": true
   },
   "recipe_calibration": {
     "refresh_every_optimizer_steps": 20,
-    "discover_outliers": false,
+    "discover_outliers": true,
+    "max_activation_relative_l2": 0.05,
     "approval": "manual"
   }
 }

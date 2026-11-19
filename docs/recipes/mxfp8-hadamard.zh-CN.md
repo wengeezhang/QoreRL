@@ -29,7 +29,7 @@
 }
 ```
 
-`layers` 从 0 开始，省略则选全部；空列表、重复索引、越界索引都会拒绝。直接 MXFP8 recipe 只接受 `layers`。Hadamard 的 `block_size` 为不小于 2 的 2 的幂，必须整除输入通道数；两种 recipe 都要求权重的输入和输出维度为 32 的倍数。**Hadamard 的 block size 与 MXFP8 每 32 个元素共享 scale 是两个不同参数。** `seed` 决定每层固定的 ±1 符号，训练过程中不重新抽样。
+`layers` 从 0 开始，省略则选全部；空列表、重复索引、越界索引都会拒绝。通用 recipe 名 `mlp-down-v1` 和 `hadamard-mlp-down-v1` 可通过 `recipe_options.precision` 选择底层格式，默认是 `mxfp8`，也可选 `nvfp4`。下面的分块、kernel 与验证命令针对 MXFP8。Hadamard 的 `block_size` 为不小于 2 的 2 的幂，必须整除输入通道数；两种 recipe 都要求权重的输入和输出维度为 32 的倍数。**Hadamard 的 block size 与 MXFP8 每 32 个元素共享 scale 是两个不同参数。** `seed` 决定每层固定的 ±1 符号，训练过程中不重新抽样。
 
 ## 2. 实际执行的数学变换
 
@@ -64,7 +64,7 @@ Y = X_rot @ W_rot.T
 | rollout 选定层 | vLLM 的 `FlashInferCutlassMxfp8LinearKernel`；原生输入量化和 MXFP8 GEMM |
 | rollout 权重缓存 | 从 canonical BF16 配套旋转、量化，再由 native kernel 完成后处理 |
 
-本实现使用自定义 autograd 调用 TE 的 Fprop/Dgrad/Wgrad；它是低精度训练的反向估计规则，不是对离散舍入函数求出了非零的精确导数。它没有加入 BF16 Wgrad 修复、每 20 步校准或自动选择敏感层。
+本实现使用[两个格式共用的自定义 autograd](../../qorerl/recipes/te_block_linear.py) 调用 TE 的 Fprop/Dgrad/Wgrad；它是低精度训练的反向估计规则，不是对离散舍入函数求出了非零的精确导数。它没有加入 BF16 Wgrad 修复、每 20 步校准或自动选择敏感层。
 
 训练侧 token 行数 M 可以不是 32 的倍数：GEMM 内部把 X 和对应的上游梯度补零，输出和 Dgrad 去掉补齐行。这些内部行不成为轨迹、不进入 reward 或 loss。通道维度不偷偷补齐；不满足要求时拒绝执行。
 

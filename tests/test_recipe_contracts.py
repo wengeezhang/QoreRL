@@ -70,7 +70,7 @@ def test_expansion_is_an_opt_in_permission_of_smoothquant():
     expand = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1], "allow_layer_expansion": True})
     assert expand.identity != fixed.identity
     assert expand.select_layers(3) == fixed.eligible_layers(3) == (1,)
-    assert expand.eligible_layers(3) == (0, 1, 2)
+    assert expand.eligible_layers(3) == (1,)
     with pytest.raises(ValueError, match="exceed"):
         expand.eligible_layers(1)
     with pytest.raises(ValueError, match="boolean"):
@@ -80,12 +80,15 @@ def test_expansion_is_an_opt_in_permission_of_smoothquant():
 
 
 def test_first_activation_with_identity_scale_is_a_new_recoverable_policy():
-    spec = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [0], "allow_layer_expansion": True})
+    spec = resolve_recipe(
+        MXFP8_SMOOTHQUANT, {"layers": [0, 1], "smoothquant_layers": [0], "allow_layer_expansion": True}
+    )
     state = make_state(spec)
     initial = down_proj_name(0)
     extra = state.add_target(1, torch.zeros(32, 64), active=False)
     before = state.to_dict()
-    assert set(state.report()["targets"]) == {initial}
+    assert set(state.report()["targets"]) == {initial, extra}
+    assert state.report()["smoothquant_targets"] == [initial]
     assert set(state.report()["eligible_targets"]) == {initial, extra}
     state.install_scales({**state.scales, extra: torch.ones(64)})
     promoted = state.active_identity
@@ -105,7 +108,7 @@ def test_startup_artifact_cannot_activate_layers_outside_initial_selection(tmp_p
         learner_backend="torch_test",
         rollout_backend="torch_test",
         recipe_id=MXFP8_SMOOTHQUANT,
-        recipe_options={"layers": [1], "allow_layer_expansion": True},
+        recipe_options={"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True},
         recipe_calibration={"scale_artifact": str(artifact)},
     )
     artifact.write_text(
@@ -245,3 +248,62 @@ def test_smoothquant_scale_ownership_and_checkpoint_round_trip():
     with pytest.raises(ValueError, match="digest"):
         other.load(payload)
     assert other.active_identity == identity
+
+
+@pytest.mark.parametrize("precision", ["mxfp8", "nvfp4"])
+@pytest.mark.parametrize("expand", [True, False])
+def test_smoothing_is_bounded_by_the_fixed_low_precision_scope(precision, expand):
+    base = (7, 15, 20, 25)
+    initial = base[:-1]
+    options = {
+        "precision": precision,
+        "layers": base,
+        "smoothquant_layers": initial,
+        "allow_layer_expansion": expand,
+    }
+    spec = resolve_recipe("smoothquant-mlp-down-v1", options)
+    assert spec.identity == resolve_recipe(f"{precision}-smoothquant-mlp-down-v1", options).identity
+    assert spec.select_layers(32) == base
+    assert spec.initial_smoothquant_layers(32) == initial
+    assert spec.eligible_layers(32) == (base if expand else initial)
+    state = RecipeState(spec)
+    w = torch.ones(32, 64)
+    for index in base:
+        state.add_target(index, w)
+    with pytest.raises(ValueError, match="outside configured"):
+        state.add_target(23, w)
+    direct = down_proj_name(25)
+    assert state.transform_weight(w, direct) is w
+    proposed = {**state.scales, direct: torch.full((64,), 2.0)}
+    with pytest.raises(ValueError, match="eligible"):
+        state.install_scales({**proposed, down_proj_name(23): torch.ones(64)})
+    if expand:
+        state.install_scales(proposed)
+        torch.testing.assert_close(state.transform_weight(w, direct), w * 2)
+    else:
+        with pytest.raises(ValueError, match="eligible"):
+            state.install_scales(proposed)
+    assert set(state.report()["targets"]) == {down_proj_name(i) for i in base}
+
+
+def test_format_selection_and_invalid_bounds_are_checked_before_execution():
+    assert TrainConfig().recipe.name == MXFP8_MLP
+    for name in ("mlp-down-v1", "hadamard-mlp-down-v1", "smoothquant-mlp-down-v1"):
+        assert resolve_recipe(name).precision == "mxfp8"
+        assert resolve_recipe(name, {"precision": "nvfp4"}).precision == "nvfp4"
+        assert resolve_recipe(name).identity != resolve_recipe(name, {"precision": "nvfp4"}).identity
+    with pytest.raises(ValueError, match="conflicts"):
+        resolve_recipe(MXFP8_SMOOTHQUANT, {"precision": "nvfp4"})
+    with pytest.raises(ValueError, match="Unsupported precision"):
+        resolve_recipe("mlp-down-v1", {"precision": "int7"})
+    with pytest.raises(ValueError, match="subset"):
+        resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [7], "smoothquant_layers": [8]})
+    with pytest.raises(ValueError, match="exceed"):
+        resolve_recipe(MXFP8_SMOOTHQUANT, {"smoothquant_layers": [8]}).select_layers(8)
+    with pytest.raises(ValueError, match="CPU test engines"):
+        TrainConfig(
+            learner_backend="torch_test",
+            rollout_backend="torch_test",
+            recipe_id="smoothquant-mlp-down-v1",
+            recipe_options={"precision": "nvfp4"},
+        )

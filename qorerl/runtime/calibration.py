@@ -72,7 +72,8 @@ def load_initial_scales(cfg, artifact):
         if artifact.get("recipe_id") == fixed_recipe_id:
             context["recipe_id"] = fixed_recipe_id
     scales = parse_scale_artifact(artifact, **context)
-    if recipe.layers is not None and scales.keys() - {down_proj_name(i) for i in recipe.layers}:
+    initial = recipe.layers if recipe.smoothquant_layers is None else recipe.smoothquant_layers
+    if initial is not None and scales.keys() - {down_proj_name(i) for i in initial}:
         raise ValueError("Startup scale artifact names a layer outside the initial SmoothQuant targets")
     return scales
 

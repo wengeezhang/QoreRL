@@ -82,6 +82,8 @@ def _artifact_context(model, model_revision, recipe_id):
 def make_scale_artifact(scales, *, model, model_revision, recipe_id):
     """Serialize final multiplicative scales S (X/S, W*S), including their content digest."""
     context = _artifact_context(model, model_revision, recipe_id)
+    if not scales:
+        raise ValueError("Scale artifact must contain at least one named scale vector")
     digest = scale_digest(scales)
     _check_names(scales)
     return {
@@ -216,7 +218,9 @@ class _NonfiniteProjection(ValueError):
 
 
 def _error(fprop, x, weight, scale, reference, reference_norm):
-    activation, transformed_weight = smooth_input(x, scale), smooth_weight(weight, scale)
+    activation, transformed_weight = (
+        (x, weight) if scale is None else (smooth_input(x, scale), smooth_weight(weight, scale))
+    )
     if not torch.isfinite(activation).all().item() or not torch.isfinite(transformed_weight).all().item():
         raise _NonfiniteProjection("SmoothQuant transformed operands exceed the BF16 range")
     output = fprop(activation, transformed_weight)
@@ -235,10 +239,10 @@ def _error(fprop, x, weight, scale, reference, reference_norm):
 
 @torch.no_grad()
 def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer_expansion=False):
-    """Evaluate active scale refreshes and, when authorized, first activations on eligible BF16 layers.
+    """Measure a new overlay against direct low precision, or a refresh against the active S.
 
-    Refreshes require a strict held-out gain. Activation requires a detected outlier
-    and reports both direct MXFP8 and fitted SmoothQuant error against BF16.
+    Both comparisons use the same BF16 reference and require a strict held-out
+    gain. First activation also requires an outlier in the authorized base scope.
     """
     if config.discovery_only:
         return {}, outlier_report(samples, config)
@@ -252,12 +256,8 @@ def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer
     _check_names(weights)
     if type(allow_layer_expansion) is not bool:
         raise ValueError("allow_layer_expansion must be boolean")
-    if (
-        not isinstance(current_scales, dict)
-        or not current_scales
-        or not current_scales.keys() <= weights.keys()
-    ):
-        raise ValueError("Active scales must name a nonempty subset of the supplied calibration scope")
+    if not isinstance(current_scales, dict) or not current_scales.keys() <= weights.keys():
+        raise ValueError("Active scales must name a subset of the supplied calibration scope")
     if not allow_layer_expansion and current_scales.keys() != weights.keys():
         raise ValueError("Active scales must cover the entire supplied calibration scope")
     scale_digest(current_scales)
@@ -271,7 +271,8 @@ def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer
         event["action"] = "activate" if activating else "refresh"
         if activating:
             event.update(
-                direct_mxfp8_relative_l2=None, max_activation_relative_l2=config.max_activation_relative_l2
+                direct_low_precision_relative_l2=None,
+                max_activation_relative_l2=config.max_activation_relative_l2,
             )
         evidence.append(event)
         if event["status"] != "discovered":
@@ -300,15 +301,15 @@ def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer
                 event.update(status="insufficient_signal", reason="zero_heldout_reference")
                 continue
             if activating:
-                event["current_relative_l2"] = 0.0
                 try:
-                    event["direct_mxfp8_relative_l2"] = _error(fprop, heldout, weight, old, reference, norm)
+                    before = _error(fprop, heldout, weight, None, reference, norm)
                 except _NonfiniteProjection as exc:
-                    event.update(status="invalid_candidate", reason=f"Direct MXFP8: {exc}")
+                    event.update(status="invalid_candidate", reason=f"Direct low precision: {exc}")
                     continue
+                event["direct_low_precision_relative_l2"] = before
             else:
                 before = _error(fprop, heldout, weight, old, reference, norm)
-                event["current_relative_l2"] = before
+            event["current_relative_l2"] = before
             new = _fit_scale(maxima, weight, old, config.alpha)
             if not torch.isfinite(new).all().item() or not (new > 0).all().item():
                 event.update(status="invalid_candidate", reason="scale_outside_positive_fp32_range")
@@ -319,16 +320,18 @@ def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer
                 event.update(status="invalid_candidate", reason=str(exc))
                 continue
         event["candidate_relative_l2"] = after
-        if activating:
-            if config.max_activation_relative_l2 is not None and after > config.max_activation_relative_l2:
-                event.update(status="activation_cost_exceeded", reason="above_max_activation_relative_l2")
-                continue
-        else:
-            improvement = (before - after) / before if before > 0 else None
-            event["relative_improvement"] = improvement
-            if after >= before or improvement < config.min_relative_improvement or torch.equal(new, old):
-                event["status"] = "no_gain"
-                continue
+        improvement = (before - after) / before if before > 0 else None
+        event["relative_improvement"] = improvement
+        if after >= before or improvement < config.min_relative_improvement or torch.equal(new, old):
+            event["status"] = "no_gain"
+            continue
+        if (
+            activating
+            and config.max_activation_relative_l2 is not None
+            and after > config.max_activation_relative_l2
+        ):
+            event.update(status="activation_cost_exceeded", reason="above_max_activation_relative_l2")
+            continue
         event["status"] = "proposed"
         overrides[name] = new
     return overrides, evidence
