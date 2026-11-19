@@ -92,15 +92,20 @@ class _CachedMXFP8Method:
         self.name = name
         self.runtime_name = runtime_name
         self.layer = layer
+        self.bf16_method = layer.quant_method
         self.kernel = kernel
         self.carrier = None
         self.apply_calls = 0
 
     def apply(self, layer, x, bias=None):
-        if not self.installation.ready or self.carrier is None:
+        if not self.installation.ready:
             raise RuntimeError("MXFP8 rollout cache is invalid; a complete weight refit is required")
         if layer is not self.layer:
             raise RuntimeError("MXFP8 runtime method was attached to the wrong layer")
+        if not self.installation.state.is_active(self.name):
+            return self.bf16_method.apply(layer, x, bias)
+        if self.carrier is None:
+            raise RuntimeError(f"Active MXFP8 rollout target is missing its carrier: {self.name}")
         if not isinstance(x, torch.Tensor) or x.dtype != torch.bfloat16 or x.device != layer.weight.device:
             raise ValueError("Native rollout MXFP8 requires BF16 activations on the weight device")
         effective_input = self.installation.state.transform_input(x, self.name).contiguous()
@@ -138,6 +143,9 @@ class VLLMMXFP8Installation:
         self.invalidate()
         carriers = []
         for method in self.methods:
+            if not self.state.is_active(method.name):
+                carriers.append(None)
+                continue
             weight = method.layer.weight
             _validate_weight(weight, method.name)
             if tuple(weight.shape) != self.state.targets[method.name]:
@@ -163,6 +171,8 @@ class VLLMMXFP8Installation:
     def report(self):
         entries = []
         for method in self.methods:
+            if not self.state.is_active(method.name):
+                continue
             carrier = method.carrier
             entries.append(
                 {
@@ -204,12 +214,12 @@ def install(model, recipe):
     engine_config = getattr(model, "vllm_config", None)
     if not getattr(getattr(engine_config, "model_config", None), "enforce_eager", False):
         raise ValueError("The native rollout MXFP8 cache adapter requires vLLM enforce_eager=True")
-    selected = recipe.select_layers(config.num_hidden_layers)
+    selected = set(recipe.select_layers(config.num_hidden_layers))
     backend = _load_backend()
     state = RecipeState(recipe)
     installation = VLLMMXFP8Installation(state, backend, [])
     modules = dict(model.named_modules())
-    for index in selected:
+    for index in recipe.eligible_layers(config.num_hidden_layers):
         runtime_name = f"model.layers.{index}.mlp.down_proj"
         layer = modules.get(runtime_name)
         if not isinstance(layer, backend.linear) or getattr(layer, "tp_size", None) != 1:
@@ -217,7 +227,7 @@ def install(model, recipe):
         if not isinstance(layer.quant_method, backend.unquantized):
             raise ValueError(f"Expected a BF16 target; recipe installation is one-time: {runtime_name}")
         _validate_weight(layer.weight, runtime_name)
-        name = state.add_target(index, layer.weight)
+        name = state.add_target(index, layer.weight, active=index in selected)
         kernel_config = backend.config(weight_shape=tuple(layer.weight.shape))
         supported, reason = backend.kernel.can_implement(kernel_config)
         if not supported:

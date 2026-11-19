@@ -2,10 +2,11 @@
 
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from qorerl.recipes.calibration import make_scale_artifact, parse_scale_artifact
+from qorerl.recipes.state import down_proj_name
 
 
 def artifact_context(cfg):
@@ -59,6 +60,21 @@ def read_payload(checkpoint, review):
 
 def load_scales(cfg, artifact):
     return parse_scale_artifact(artifact, **artifact_context(cfg))
+
+
+def load_initial_scales(cfg, artifact):
+    context = artifact_context(cfg)
+    recipe = cfg.recipe
+    if recipe.allow_layer_expansion and isinstance(artifact, dict):
+        # An offline fit for the same initial layers also fits the first batch
+        # of an expanding run. Saved proposals still require an exact policy.
+        fixed_recipe_id = replace(recipe, allow_layer_expansion=False).identity
+        if artifact.get("recipe_id") == fixed_recipe_id:
+            context["recipe_id"] = fixed_recipe_id
+    scales = parse_scale_artifact(artifact, **context)
+    if recipe.layers is not None and scales.keys() - {down_proj_name(i) for i in recipe.layers}:
+        raise ValueError("Startup scale artifact names a layer outside the initial SmoothQuant targets")
+    return scales
 
 
 def crosses_interval(before, after, interval):

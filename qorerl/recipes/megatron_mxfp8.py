@@ -21,13 +21,16 @@ class MegatronMXFP8Installation:
         self.observer = None
         self.calibrator = None
         self.weights = {name: module.weight for name, module in targets}
+        self._bf16_forwards = {name: module.forward for name, module in targets}
 
     def forward(self, module, x, name):
-        self.calls[name] += 1
-        if self.observer is not None:
-            self.observer.capture(name, x, module.weight)
         if self.calibrator is not None:
             self.calibrator.capture(name, x)
+        if not self.state.is_active(name):
+            return self._bf16_forwards[name](x)
+        if self.observer is not None:
+            self.observer.capture(name, x, module.weight)
+        self.calls[name] += 1
         x = self.state.transform_input(x, name)
         weight = self.state.transform_weight(module.weight, name)
         # SmoothQuant maps dX_eff to dX_eff/S and dW_eff to dW_eff*S.
@@ -43,7 +46,7 @@ class MegatronMXFP8Installation:
             "wgrad": "mxfp8_e4m3",
             "parameter_export": "canonical_bf16",
             "gradient_return": "bf16_in_canonical_basis",
-            "calls": dict(self.calls),
+            "calls": {name: count for name, count in self.calls.items() if self.state.is_active(name)},
         }
 
 
@@ -76,7 +79,8 @@ def install(model, recipe, num_layers):
     if len(layers) != num_layers:
         raise ValueError("Expected the complete single-rank decoder layer list")
     state, targets = RecipeState(recipe), []
-    for index in recipe.select_layers(num_layers):
+    selected = set(recipe.select_layers(num_layers))
+    for index in recipe.eligible_layers(num_layers):
         mlp = layers[index].mlp
         module = mlp.linear_fc2
         if type(mlp).__name__ != "MLP" or not isinstance(module, TERowParallelLinear):
@@ -86,7 +90,7 @@ def install(model, recipe, num_layers):
         if getattr(module, "bias", None) is not None:
             raise ValueError("First MLP recipe requires bias-free down projections")
         _validate_native_weight(module.weight)
-        targets.append((state.add_target(index, module.weight), module))
+        targets.append((state.add_target(index, module.weight, active=index in selected), module))
     installation = MegatronMXFP8Installation(state, backend, targets)
     # Validate every target before changing any execution method.
     for name, module in targets:

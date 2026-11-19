@@ -1,6 +1,7 @@
 """Recipe identity, canonical state and recovery are enforced before execution."""
 
 import io
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,8 +10,11 @@ import torch
 
 from qorerl.engines.base import validate_install
 from qorerl.engines.single_rank_learner import SingleRankGRPOLearner
+from qorerl.recipes.calibration import make_scale_artifact
 from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, MXFP8_SMOOTHQUANT, resolve_recipe
-from qorerl.recipes.state import RecipeState
+from qorerl.recipes.state import RecipeState, down_proj_name
+from qorerl.runtime.calibration import artifact_context, load_initial_scales, load_scales
+from qorerl.runtime.ray_runtime import run_sync_grpo
 from qorerl.training.config import TrainConfig
 from qorerl.training.contracts import PolicyVersion, WeightSnapshot
 
@@ -54,6 +58,76 @@ def test_no_silent_recipe_fallback_or_ignored_options():
         TrainConfig(recipe_id=MXFP8_MLP, recipe_options={"block_size": 128})
     with pytest.raises(ValueError, match="no native quantization fallback"):
         TrainConfig(learner_backend="torch_test", rollout_backend="torch_test", recipe_id=MXFP8_MLP)
+
+
+def test_expansion_is_an_opt_in_permission_of_smoothquant():
+    fixed = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1]})
+    assert "allow_layer_expansion" not in fixed.to_dict()
+    assert (
+        fixed.identity
+        == resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1], "allow_layer_expansion": False}).identity
+    )
+    expand = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1], "allow_layer_expansion": True})
+    assert expand.identity != fixed.identity
+    assert expand.select_layers(3) == fixed.eligible_layers(3) == (1,)
+    assert expand.eligible_layers(3) == (0, 1, 2)
+    with pytest.raises(ValueError, match="exceed"):
+        expand.eligible_layers(1)
+    with pytest.raises(ValueError, match="boolean"):
+        resolve_recipe(MXFP8_SMOOTHQUANT, {"allow_layer_expansion": 1})
+    with pytest.raises(ValueError, match="Unsupported options"):
+        resolve_recipe(MXFP8_HADAMARD, {"allow_layer_expansion": True})
+
+
+def test_first_activation_with_identity_scale_is_a_new_recoverable_policy():
+    spec = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [0], "allow_layer_expansion": True})
+    state = make_state(spec)
+    initial = down_proj_name(0)
+    extra = state.add_target(1, torch.zeros(32, 64), active=False)
+    before = state.to_dict()
+    assert set(state.report()["targets"]) == {initial}
+    assert set(state.report()["eligible_targets"]) == {initial, extra}
+    state.install_scales({**state.scales, extra: torch.ones(64)})
+    promoted = state.active_identity
+    assert state.is_active(extra) and promoted != state.validate(before)
+    for invalid in ({extra: torch.ones(64)}, {**state.scales, "unknown": torch.ones(64)}):
+        with pytest.raises(ValueError, match="scales"):
+            state.install_scales(invalid)
+        assert state.active_identity == promoted
+    state.load(before)
+    assert not state.is_active(extra)
+    assert state.is_active(initial)
+
+
+def test_startup_artifact_cannot_activate_layers_outside_initial_selection(tmp_path):
+    artifact = tmp_path / "scales.json"
+    cfg = TrainConfig(
+        learner_backend="torch_test",
+        rollout_backend="torch_test",
+        recipe_id=MXFP8_SMOOTHQUANT,
+        recipe_options={"layers": [1], "allow_layer_expansion": True},
+        recipe_calibration={"scale_artifact": str(artifact)},
+    )
+    artifact.write_text(
+        json.dumps(make_scale_artifact({down_proj_name(0): torch.ones(32)}, **artifact_context(cfg)))
+    )
+    with pytest.raises(ValueError, match="outside the initial"):
+        run_sync_grpo(cfg, tmp_path / "output")
+
+
+def test_offline_fit_for_same_initial_layers_can_seed_expansion_but_not_a_live_review():
+    fixed = TrainConfig(recipe_id=MXFP8_SMOOTHQUANT, recipe_options={"layers": [1]})
+    cfg = replace(fixed, recipe_options={"layers": [1], "allow_layer_expansion": True})
+    name = down_proj_name(1)
+    scales = {name: torch.ones(32)}
+    artifact = make_scale_artifact(scales, **artifact_context(fixed))
+    torch.testing.assert_close(load_initial_scales(cfg, artifact)[name], scales[name])
+    with pytest.raises(ValueError, match="recipe_id"):
+        load_scales(cfg, artifact)
+    with pytest.raises(ValueError, match="recipe_id"):
+        load_initial_scales(
+            replace(cfg, recipe_options={"layers": [2], "allow_layer_expansion": True}), artifact
+        )
 
 
 def make_state(spec):

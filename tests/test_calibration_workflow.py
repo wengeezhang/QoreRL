@@ -9,6 +9,7 @@ import ray
 import torch
 
 from qorerl.recipes.calibration import make_scale_artifact
+from qorerl.recipes.state import down_proj_name
 from qorerl.runtime.calibration import artifact_context, crosses_interval, read_payload, read_review
 from qorerl.runtime.ray_runtime import run_sync_grpo
 from qorerl.training.config import TrainConfig
@@ -29,14 +30,29 @@ def cluster():
         ray.shutdown()
 
 
-def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cluster):
-    cfg = replace(TrainConfig.load(CONFIG), steps=2)
+@pytest.mark.parametrize("expand", [False, True], ids=["fixed-scope", "first-activation"])
+def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cluster, expand):
+    options = {"layers": [1], "allow_layer_expansion": True} if expand else {"layers": [0, 1, 2]}
+    cfg = replace(TrainConfig.load(CONFIG), steps=2, recipe_options=options)
+    initial_targets = {down_proj_name(index) for index in options["layers"]}
+    candidate_target = down_proj_name(0)
     paused = run_sync_grpo(replace(cfg, steps=1), tmp_path / "paused")
     assert paused["status"] == "awaiting_review" and paused["last_step"] == 1
     checkpoint = Path(paused["checkpoint"])
     review = json.loads((checkpoint / "candidate.json").read_text())
-    assert [row["status"] for row in review["evidence"]] == ["proposed", "no_gain", "not_selected"]
-    assert list(review["scale_artifact"]["scales"]) == ["model.layers.0.mlp.down_proj.weight"]
+    evidence = {row["target"]: row for row in review["evidence"]}
+    assert evidence[candidate_target]["action"] == ("activate" if expand else "refresh")
+    assert evidence[candidate_target]["status"] == "proposed"
+    existing = evidence[down_proj_name(1)]
+    assert existing["action"] == "refresh" and existing["status"] == "no_gain"
+    assert evidence[down_proj_name(2)]["status"] == "not_selected"
+    assert set(review["scale_artifact"]["scales"]) == {candidate_target}
+    assert len(paused["execution"]) == cfg.rollout_workers + 1
+    for worker in paused["execution"]:
+        assert set(worker["targets"]) == initial_targets
+        assert worker["identity"] == paused["policy_version"]["recipe_id"]
+        if expand:
+            assert set(worker["eligible_targets"]) == set(evidence)
     with pytest.raises(ValueError, match="--accept-candidate"):
         run_sync_grpo(cfg, tmp_path / "missing", resume=checkpoint)
     with pytest.raises(ValueError, match="different calibration candidate"):
@@ -50,20 +66,26 @@ def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cl
     )
     assert rejected["status"] == "completed" and rejected["final_metrics"] is None
     assert rejected["policy_version"] == paused["policy_version"]
+    assert rejected["execution"] == paused["execution"]
     accepted = run_sync_grpo(
         cfg, tmp_path / "accepted", resume=checkpoint, accept_candidate=paused["candidate_id"]
     )
-    new_policy = events(tmp_path / "accepted/calibration.jsonl")[0]["policy"]
+    applied, reevaluated = events(tmp_path / "accepted/calibration.jsonl")
+    new_policy = applied["policy"]
+    next_actions = {row["target"]: row["action"] for row in reevaluated["evidence"]}
+    assert next_actions[candidate_target] == "refresh"
     assert new_policy["weight_version"] == paused["policy_version"]["weight_version"]
     assert new_policy["recipe_id"] != paused["policy_version"]["recipe_id"]
-    assert all(
-        t["policy_version"] == new_policy
-        for t in events(tmp_path / "accepted/trajectories.jsonl")[0]["trajectories"]
-    )
+    for worker in accepted["execution"]:
+        assert set(worker["targets"]) == initial_targets | {candidate_target}
+        assert worker["identity"] == accepted["policy_version"]["recipe_id"]
+    next_batch = events(tmp_path / "accepted/trajectories.jsonl")[0]
+    assert all(t["policy_version"] == new_policy for t in next_batch["trajectories"])
     auto = run_sync_grpo(
         replace(cfg, recipe_calibration={**cfg.recipe_calibration, "approval": "auto"}), tmp_path / "auto"
     )
     assert auto["status"] == accepted["status"] == "completed"
+    assert events(tmp_path / "auto/trajectories.jsonl")[1] == next_batch
     assert auto["policy_version"] == accepted["policy_version"]
     a, b = [torch.load(Path(run["checkpoint"]) / "learner.pt", weights_only=True) for run in (auto, accepted)]
     for field in ("model", "master_parameters", "optimizer", "optimizer_steps"):

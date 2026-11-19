@@ -6,20 +6,20 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 
 每次运行先选一份 recipe。以动态 SmoothQuant 为例，**已启用层**实际执行 MXFP8 + SmoothQuant，**观察范围**决定校准时从哪里采集激活。观察 BF16 层只需要读取它的输入。它可以一直使用 BF16，直到用户授权的候选完成发布。
 
-| 用户想做什么 | 设置或入口 | 实际行为 |
+| 用户场景 | 用户设置 | 实际行为及实现入口 |
 | --- | --- | --- |
-| 跑 BF16 基线 | 省略 recipe 配置 | 默认使用 BF16，周期校准关闭。 |
-| 固定使用一套方案 | 固定 Hadamard 选择层、分块和种子。已有 SmoothQuant 的 S 时，设置 `scale_artifact` 和 `refresh_every_optimizer_steps: 0` | Hadamard 旋转固定。外部 S 在首次采样前导入，训练期间沿用。 |
-| 只观察 outlier | 原生 BF16、直接 MXFP8、固定 Hadamard 或 SmoothQuant 开启 `discovery_only` | 到期写发现报告并继续训练。BF16 可观察所有 `down_proj`。固定范围的 MXFP8 recipe 观察已选层。 |
-| 只更新指定层的 S | 选动态 SmoothQuant 和 `layers`。已知要校准哪些层时可设 `discover_outliers: false` | 定期在这些层拟合并验证 S。有候选才进入人工确认或按授权自动应用。已有外部 S 也可导入后继续刷新。 |
-| 指定初始层，允许同一 recipe 扩层 | **扩层设计**：初始 `layers: [7, 19]`，显式授权观察并新增其他 `down_proj` | 初始只有两层走 MXFP8。其余层用 BF16，周期观测覆盖全部 `down_proj`。新层可以提议首次启用 SmoothQuant，已启用层可以提议刷新 S。详见下例。 |
-| 让已选 recipe 无人值守运行 | 显式选择 SmoothQuant，设置 `approval: "auto"`，并指定是否授权扩层 | 候选按该 recipe 的规则批准。省略 `layers` 会从第一批起在全部 `down_proj` 使用该 recipe。跨 recipe 自动选择仍属长期目标。 |
+| BF16 基线 | 省略 recipe 配置 | BF16 训练与采样，默认关闭周期校准。[训练配置](qorerl/training/config.py) |
+| 固定使用一套方案 | 固定 Hadamard 配置层、分块和种子。固定 SmoothQuant 配置 `scale_artifact` 和 `refresh_every_optimizer_steps: 0` | Hadamard 旋转由配置决定。外部 S 在首次采样前导入，之后沿用。[旋转与缩放状态](qorerl/recipes/state.py) · [启动时导入](qorerl/runtime/ray_runtime.py) |
+| 只观察 outlier | 设置 `discovery_only: true` | 周期结束时写发现报告并继续训练。原生 BF16 可观察所有 `down_proj`，固定范围的 MXFP8 recipe 观察已选层，允许扩层的 SmoothQuant 观察所有 `down_proj`。[输入采集](qorerl/engines/single_rank_learner.py) · [发现报告](qorerl/recipes/calibration.py) |
+| 在指定层维护 SmoothQuant | 指定 `layers`，沿用默认固定范围。已知目标层时可设 `discover_outliers: false` | 只在这些层比较旧 S 和候选 S。可在启动时导入已有 S，后续继续刷新。[候选拟合与比较](qorerl/recipes/calibration.py) |
+| 先启用少数层，后续允许扩层 | 指定初始 `layers: [7, 19]`，开启 `recipe_options.allow_layer_expansion: true` | 从第一批起仅初始层使用 MXFP8 + SmoothQuant。校准可观察所有 `down_proj`，为 BF16 层提议首次启用，也可为生效层提议刷新 S。两类变更都沿用所选 recipe。[选层](qorerl/recipes/spec.py) · [Megatron](qorerl/recipes/megatron_mxfp8.py) · [vLLM](qorerl/recipes/vllm_mxfp8.py) |
+| 在用户授权范围内无人值守 | 选 SmoothQuant，设置 `approval: "auto"`。扩层权限单独配置 | 合格候选在检查点保存后自动发布。默认人工模式会暂停并等待决定。省略 `layers` 会从第一批起启用所有 `down_proj`。跨 recipe 自动选择属于长期目标。[审核与续训](qorerl/runtime/calibration.py) · [发布](qorerl/runtime/ray_runtime.py) |
 
 校准周期按实际完成的优化器更新计数，默认每跨过 20 次更新，在随后的同步批边界检查一次。默认人工确认。发现、拟合和批准是独立的步骤，用户已有的证据或 S 决定从哪一步进入。[配置与默认值](qorerl/training/config.py) · [选层](qorerl/recipes/spec.py) · [校准条件](qorerl/recipes/calibration.py) · [运行示例](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
 ### 扩层特例：第 23 层什么时候离开 BF16？
 
-下表是本轮扩层的设计与验收目标。假设用户初始启用第 7、19 层，授权观察所有 `down_proj`，本轮只接受第 23 层的新增候选。
+层号从 0 开始。假设第 7、19 层已启用，第 23 层是本次校准唯一合格的候选。人工确认针对本次候选清单整体进行。
 
 | 时刻 | 第 7、19 层 | 第 23 层 |
 | --- | --- | --- |
@@ -29,7 +29,9 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 | 人工或自动决定 | 继续使用已生效的 S | 拒绝则继续 BF16。候选先随变更前的检查点保存。批准后由 learner 应用并发布新策略。全部 rollout 确认后，下一批才使用 MXFP8 + SmoothQuant。 |
 | 后续校准 | 可继续刷新 S | 已进入生效范围，按同一套刷新规则比较旧 S 与新 S。 |
 
-首次启用时，当前 BF16 输出相对自身的误差为零。若套用刷新 S 的“必须比当前误差低”，任何新层都进不来。首次启用要回答的是“把这个 BF16 层也量化，需要接受多少误差”。两项局部误差可以辅助决策，端到端的成本、奖励和训练稳定性仍需实测。
+首次启用时，当前 BF16 输出相对自身的误差为零。若套用刷新 S 的“必须比当前误差低”，任何新层都进不来。首次启用要回答的是“把这个 BF16 层也量化，需要接受多少误差”。可以设置 `recipe_calibration.max_activation_relative_l2` 限定首次启用的误差。默认没有该上限，发现 outlier 且留出数据上的对照与候选均数值有效即可提议。是否优于直接 MXFP8 可从报告中对比。端到端成本、奖励和训练稳定性需要另外实测。
+
+在三层 CPU 模拟测试中，初始只启用第 1 层。首轮校准发现第 0 层有 outlier，直接 MXFP8 的留出误差为 7.82%，配上候选 S 后为 4.79%。拒绝后仅第 1 层启用；接受后 learner 和两个 rollout 都启用第 0、1 层，第 2 层继续 BF16。后续校准将第 0 层视为已启用层。这是对上述流程的验证。[CPU 多进程测试](tests/test_calibration_workflow.py)
 
 ## 2. 一批训练由谁负责
 
@@ -62,6 +64,6 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 
 | 状态 | 范围 |
 | --- | --- |
-| 本地已验证 | CPU Ray 多进程测试覆盖同步 GRPO、策略版本发布、SmoothQuant 候选的接受与拒绝，以及从检查点继续训练。示例中的量化数字来自 CPU 模拟。[流程测试](tests/test_calibration_workflow.py) |
+| 本地已验证 | CPU Ray 多进程测试覆盖同步 GRPO、策略版本发布、SmoothQuant 的首次启用与刷新、接受与拒绝，以及从检查点继续训练。示例中的量化数字来自 CPU 模拟。[流程测试](tests/test_calibration_workflow.py) |
 | 原生代码已实现，GPU 待验收 | 首个后端组合是单 rank dense Qwen3、Megatron / TE 和 vLLM，覆盖 BF16 基线及选定 MLP 输出投影的直接 MXFP8、固定 Hadamard 和动态 SmoothQuant。GPU 上的实际执行、refit 后同一 token 的训推概率差异、学习效果和成本均待测量。[运行与验收指南](docs/ray-grpo.zh-CN.md) |
 | 后续工作 | 当前可从检查点确认的变更限于 SmoothQuant 候选。通用告警后的跨 recipe 调整、多 rank、MoE、异步训练，以及根据训练反馈自动选择修复方案，列入[开发计划](todo.md)。 |

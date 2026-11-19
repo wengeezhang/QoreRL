@@ -4,7 +4,7 @@ QoreRL 允许用户指定在哪些 MLP down projection 上使用 MXFP8，以及�
 
 ## 选择从哪一步开始
 
-涉及修改 S 的入口使用 `mxfp8-smoothquant-mlp-down-v1`。单独发现也可以在原生 BF16、直接 MXFP8、固定 Hadamard 上运行，保持原计算方式。BF16 检查全部 down projection。MXFP8 recipe 只检查 `recipe_options.layers` 选定的层（层号从 0 开始）。阶段开关填在 `recipe_calibration` 中。
+涉及修改 S 的入口使用 `mxfp8-smoothquant-mlp-down-v1`。单独发现也可以在原生 BF16、直接 MXFP8、固定 Hadamard 上运行，保持原计算方式。BF16 检查全部 down projection。固定范围的 MXFP8 recipe 检查 `recipe_options.layers` 选定的层（层号从 0 开始）。动态 SmoothQuant 开启扩层后，校准时检查所有 decoder 的 MLP down projection。阶段开关填在 `recipe_calibration` 中。
 
 | 我手里有什么 | 设置 | 到期时发生什么 |
 | --- | --- | --- |
@@ -22,9 +22,34 @@ QoreRL 允许用户指定在哪些 MLP down projection 上使用 MXFP8，以及�
 1. learner 在刚完成更新的权重上，重放刚训练的轨迹前缀，收集所选层在变换前的输入 X。按前缀去重，排除 padding，每层最多保留 `max_rows` 行（默认 128）。输入行的前半用于拟合，后半留作比较。两个集合仍可能来自同一条回答。
 2. 每个输入通道 j 取拟合行上的最大绝对值 `x_max[j]`。发现分数为这些通道最大值中的最大值除以它们的平均值。默认阈值为 4。这个分数描述同一层内通道幅度的不均衡。
 3. 对入选层取权重第 j 列的绝对值最大值 `w_max[j]`，计算 `S[j] = x_max[j]^alpha / w_max[j]^(1-alpha)`，默认 alpha 为 0.5。前向用 `X/S` 和 `W*S` 做配套变换，W 的存储形状为 [out, in]。未观测到有效信号的通道沿用原 scale。新 S 是相对原始参数的绝对缩放，刷新时替换指定层的旧值。
-4. 在相同的留出行和权重上，分别用当前 S 和候选 S 做 MXFP8 前向，与该层原始 BF16 线性投影比较相对 L2 误差。只有候选误差**严格下降**，且相对降幅达到 `min_relative_improvement`（默认 0），该层才进入候选。各层分别比较，文件中保留未入选的原因。多层同时应用的误差、训推 log-prob、奖励与端到端成本还需要另行评估。
+4. 对已经启用的层，在相同的留出行和权重上，分别用当前 S 和候选 S 做 MXFP8 前向，与该层原始 BF16 线性投影比较相对 L2 误差。只有候选误差**严格下降**，且相对降幅达到 `min_relative_improvement`（默认 0），该层才进入候选。各层分别比较，文件中保留未入选的原因。多层同时应用的误差、训推 log-prob、奖励与端到端成本还需要另行评估。
 
 这个比较让使用者分清两件事。一层可能具有明显 outlier，同时当前 MXFP8 的输出比候选缩放更接近 BF16。发现阶段可以选中它，准备阶段仍可保留原配置。
+
+## 只在发现 outlier 后扩大范围
+
+以下是可合并到[原生训练配置](../../configs/grpo_dynamic_smoothquant.json)的字段。首批只有第 7、19 层的 `down_proj` 使用 MXFP8 + SmoothQuant。每跨过 20 次优化器更新，learner 在同一轮校准中也采集其他 BF16 `down_proj` 的输入。
+
+```json
+{
+  "recipe_id": "mxfp8-smoothquant-mlp-down-v1",
+  "recipe_options": {"layers": [7, 19], "allow_layer_expansion": true},
+  "recipe_calibration": {
+    "refresh_every_optimizer_steps": 20,
+    "approval": "manual",
+    "max_activation_relative_l2": 0.05
+  }
+}
+```
+
+在 `calibration.jsonl` 的逐层证据中，`action` 区分两类评估。
+
+| action | 这层当前怎么执行 | 怎样读证据 |
+| --- | --- | --- |
+| `refresh` | MXFP8 + 当前 S | 比较当前与候选 S 相对同一 BF16 输出的误差；只有达到降幅条件才提议刷新。 |
+| `activate` | BF16 | 新层始终要先发现 outlier，再比较直接 MXFP8（`direct_mxfp8_relative_l2`）及配上候选 S 后的误差（`candidate_relative_l2`）。上例要求后者 ≤ 0.05，即相对 L2 误差不超过 5%。 |
+
+5% 是这个示例选用的容许值，默认配置不设上限。两种试算和参考值使用同一份留出输入和同一份权重。实际训练与采样仍沿用上一版本，直到批准并向所有 rollout 发布新版本。选择 `auto` 会自动应用合格候选。完整的第 23 层例子见[设计文档](../../design.md#扩层特例第-23-层什么时候离开-bf16)。
 
 ## 在 CPU 上走完一次人工确认
 
@@ -55,7 +80,7 @@ uv run qorerl train --config configs/grpo_cpu_smoothquant.json \
 
 ## 导入已有 scale
 
-外部工具需提供每个目标层一个有限、严格为正的 FP32 向量，长度等于该层的输入通道数。文件可以只覆盖部分已选层，其他层沿用当前 S（首次默认为全 1）。下例将校准工具已经生成的 `scales` 字典封装为可导入 JSON：
+外部工具需提供每个目标层一个有限、严格为正的 FP32 向量，长度等于该层的输入通道数。启动导入只允许覆盖初始选定层，可只提供其中一部分。之前按相同模型版本和相同初始层做的固定范围校准，也可以作为扩层运行的起点。初始层中未提供 S 的默认全 1，范围外仍走 BF16。下例将校准工具已经生成的 `scales` 字典封装为可导入 JSON：
 
 ```python
 import json
@@ -83,4 +108,4 @@ Path("configs/scales.json").write_text(json.dumps(artifact))
 uv run qorerl train --config configs/grpo_dynamic_smoothquant.json --out runs/sq-native
 ```
 
-[原生配置](../../configs/grpo_dynamic_smoothquant.json) 以第 7、19 层为例，需要支持原生 MXFP8 的 Megatron/TE 与 vLLM 环境。安装前提沿用 [MXFP8 指南](mxfp8-hadamard.zh-CN.md)。该 recipe 的校准证据写入 `calibration.jsonl`，包含当前 S 和候选 S 的实际比较。GPU 验收还需要检查两端相同 token 的 log-prob、refit 后输出、学习曲线、校准额外显存及耗时。
+[原生配置](../../configs/grpo_dynamic_smoothquant.json) 以第 7、19 层为例，需要支持原生 MXFP8 的 Megatron/TE 与 vLLM 环境。安装前提沿用 [MXFP8 指南](mxfp8-hadamard.zh-CN.md)。该 recipe 的校准证据写入 `calibration.jsonl`，包含当前 S 和候选 S 的实际比较。GPU 验收还需要检查两端相同 token 的 log-prob、refit 后输出、学习曲线、校准额外显存及耗时。vLLM 启动时只为初始启用层建立量化权重缓存，后续扩层和重建缓存的峰值显存需要单独预留和测量。

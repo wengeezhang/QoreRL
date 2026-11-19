@@ -148,6 +148,7 @@ class SingleRankGRPOLearner:
             self.recipe_state.scales,
             config,
             fprop=getattr(self, "calibration_fprop", None),
+            allow_layer_expansion=self.cfg.recipe.allow_layer_expansion,
         )
 
     def apply_calibration(self, scales):
@@ -155,8 +156,12 @@ class SingleRankGRPOLearner:
         if not self.cfg.recipe.uses_smoothquant:
             raise ValueError("Scale installation requires the SmoothQuant recipe")
         current = self.recipe_state.scales
-        if not isinstance(scales, dict) or not scales or set(scales) - set(current):
-            raise ValueError("Scale overrides must name at least one installed SmoothQuant target")
+        if (
+            not isinstance(scales, dict)
+            or not scales
+            or not scales.keys() <= self.recipe_state.targets.keys()
+        ):
+            raise ValueError("Scale overrides must name at least one eligible installed SmoothQuant target")
         current.update(scales)
         self.recipe_state.install_scales(current)
         self.policy_version = PolicyVersion(

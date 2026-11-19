@@ -21,6 +21,7 @@ class RecipeSpec:
     layers: tuple[int, ...] | None = None
     hadamard_block_size: int | None = None
     seed: int = 0
+    allow_layer_expansion: bool = False
 
     @property
     def is_mxfp8(self):
@@ -47,6 +48,8 @@ class RecipeSpec:
             "seed": self.seed,
             "transform": transform,
             "quantization": "e4m3-e8m0-block32" if self.is_mxfp8 else None,
+            # Older fixed-scope checkpoints use this exact spec to derive their ID.
+            **({"allow_layer_expansion": True} if self.allow_layer_expansion else {}),
         }
 
     @property
@@ -64,6 +67,10 @@ class RecipeSpec:
             raise ValueError(f"Recipe layer indices exceed model's {num_layers} layers")
         return selected
 
+    def eligible_layers(self, num_layers):
+        initial = self.select_layers(num_layers)
+        return tuple(range(num_layers)) if self.allow_layer_expansion else initial
+
 
 def resolve_recipe(name, options=None):
     if name not in BASELINES | {MXFP8_MLP, MXFP8_HADAMARD, MXFP8_SMOOTHQUANT}:
@@ -75,6 +82,8 @@ def resolve_recipe(name, options=None):
     allowed = set() if name in BASELINES else {"layers"}
     if name == MXFP8_HADAMARD:
         allowed |= {"block_size", "seed"}
+    if name == MXFP8_SMOOTHQUANT:
+        allowed.add("allow_layer_expansion")
     if set(options) - allowed:
         raise ValueError(f"Unsupported options for {name}: {sorted(set(options) - allowed)}")
     layers = options.get("layers")
@@ -95,4 +104,7 @@ def resolve_recipe(name, options=None):
     seed = options.get("seed", 0)
     if type(seed) is not int or not 0 <= seed < 2**31:
         raise ValueError("Hadamard seed must be an integer in [0, 2**31)")
-    return RecipeSpec(name, layers, block_size, seed)
+    expand = options.get("allow_layer_expansion", False)
+    if type(expand) is not bool:
+        raise ValueError("allow_layer_expansion must be a boolean")
+    return RecipeSpec(name, layers, block_size, seed, expand)

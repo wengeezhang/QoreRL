@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.nn import functional as F
 
 from qorerl.engines.factory import make_learner_engine, make_rollout_engine
 from qorerl.engines.single_rank_learner import _calibration_prefixes
@@ -53,8 +54,10 @@ def assert_same_checkpoint(a, b):
     torch.testing.assert_close(a["recipe_state"]["scales"], b["recipe_state"]["scales"], rtol=0, atol=0)
 
 
-def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_training():
-    cfg = fixture_config()
+@pytest.mark.parametrize("expand", [False, True], ids=["refresh", "first-activation"])
+def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_training(expand):
+    options = {"layers": [1], "allow_layer_expansion": True} if expand else {}
+    cfg = replace(fixture_config(), recipe_options=options)
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
     rollout.install_weights(learner.export_weights())
     batch = sample(cfg, rollout, 1)
@@ -62,12 +65,24 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
     assert update["optimizer_steps"] == 1 and update["pre_update_abs_log_ratio_mean"] < 1e-5
     version_before = rollout.install_weights(learner.export_weights())
     before = checkpoint_state(learner)
+    name = down_proj_name(0)
+    x = torch.linspace(-1.0, 1.0, 64).reshape(2, 32).bfloat16()
+    if expand:
+        assert set(before["recipe_state"]["scales"]) == {down_proj_name(1)}
+        for model in (learner.model, rollout.model):
+            projection = model.model.layers[0].mlp
+            bf16 = F.linear(x * projection.gain, projection.down_proj.weight)
+            torch.testing.assert_close(projection(x, name, model.installation), bf16, rtol=0, atol=0)
     proposals, evidence = learner.prepare_calibration(batch)
-    assert down_proj_name(0) in proposals and down_proj_name(2) not in proposals
+    assert name in proposals and down_proj_name(2) not in proposals
     assert {event["target"] for event in evidence} == set(learner.recipe_state.targets)
     for event in evidence:
-        if event["target"] in proposals:
+        if event["target"] in proposals and event["target"] in before["recipe_state"]["scales"]:
             assert event["candidate_relative_l2"] < event["current_relative_l2"]
+    if expand:
+        activation = next(event for event in evidence if event["target"] == name)
+        assert activation["current_relative_l2"] == 0
+        assert activation["candidate_relative_l2"] > 0
     assert_same_checkpoint(checkpoint_state(learner), before)
 
     ids = torch.tensor([[1, 4, 3]])
@@ -77,10 +92,22 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
     assert approved.recipe_id != version_before.recipe_id
     after = checkpoint_state(learner)
     assert_same_training_state(after, before)
-    for name, values in after["recipe_state"]["scales"].items():
-        expected = proposals.get(name, before["recipe_state"]["scales"][name])
-        torch.testing.assert_close(values, expected, rtol=0, atol=0)
+    expected = {**before["recipe_state"]["scales"], **proposals}
+    torch.testing.assert_close(after["recipe_state"]["scales"], expected, rtol=0, atol=0)
     assert rollout.install_weights(learner.export_weights()) == approved
+    if expand:
+        for model in (learner.model, rollout.model):
+            projection = model.model.layers[0].mlp
+            state = model.installation.state
+            activation = x * projection.gain
+            expected_projection = learner.calibration_fprop(
+                state.transform_input(activation, name),
+                state.transform_weight(projection.down_proj.weight, name),
+            )
+            torch.testing.assert_close(
+                projection(x, name, model.installation), expected_projection, rtol=0, atol=0
+            )
+            assert not torch.equal(expected_projection, F.linear(activation, projection.down_proj.weight))
     assert not torch.equal(rollout.model(ids), logits_before)
     torch.testing.assert_close(rollout.model(ids), learner.logits(ids), rtol=0, atol=0)
     with pytest.raises(ValueError, match="increase"):

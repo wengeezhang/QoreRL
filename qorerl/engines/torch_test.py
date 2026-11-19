@@ -43,11 +43,11 @@ class TestProjection(nn.Module):
 
     def forward(self, x, name, installation):
         x = x.to(torch.bfloat16) * self.gain
-        if name not in installation.weights:
-            return self.down_proj(x)
-        if installation.calibrator is not None:
+        if installation.calibrator is not None and name in installation.weights:
             installation.calibrator.capture(name, x)
         state = installation.state
+        if not state.is_active(name):
+            return self.down_proj(x)
         return _emulated_mxfp8_linear(
             state.transform_input(x, name), state.transform_weight(self.down_proj.weight, name)
         )
@@ -66,13 +66,14 @@ class TestLM(nn.Module):
             self.model.layers = nn.ModuleList()
             state, weights = RecipeState(recipe), {}
             selected = recipe.select_layers(3)
+            eligible = recipe.eligible_layers(3)
             for index in range(3):
                 layer = nn.Module()
                 layer.mlp = TestProjection(index)
                 self.model.layers.append(layer)
-                if index in selected:
+                if index in eligible:
                     weight = layer.mlp.down_proj.weight
-                    weights[state.add_target(index, weight)] = weight
+                    weights[state.add_target(index, weight, active=index in selected)] = weight
             self.installation = SimpleNamespace(state=state, weights=weights, calibrator=None)
 
     def forward(self, ids):
@@ -89,10 +90,12 @@ class TestLM(nn.Module):
             report.update(
                 identity=state.active_identity,
                 scale_digest=state.scale_digest,
-                targets=dict(state.targets),
+                targets={name: shape for name, shape in state.targets.items() if state.is_active(name)},
                 fprop="cpu_emulated_rowwise_block32_e4m3_bf16_linear",
                 backward="straight_through_fixture",
             )
+            if state.spec.allow_layer_expansion:
+                report["eligible_targets"] = sorted(state.targets)
         return report
 
 

@@ -269,6 +269,60 @@ def test_smoothquant_routes_unscaled_capture_and_maps_both_gradients(megatron_st
     torch.testing.assert_close(target.weight, before, rtol=0, atol=0)
 
 
+def test_expandable_recipe_captures_bf16_then_restores_promoted_execution(megatron_stubs):
+    cfg = TrainConfig(
+        recipe_id=MXFP8_SMOOTHQUANT, recipe_options={"layers": [1], "allow_layer_expansion": True}
+    )
+    model = GPTModel()
+    layer = model.decoder.layers[0].mlp.linear_fc2
+    original_forward = layer.forward
+    bf16_calls = []
+
+    def bf16(x):
+        bf16_calls.append(x.detach().clone())
+        return original_forward(x)
+
+    layer.forward = bf16
+    learner = MegatronLearner.__new__(MegatronLearner)
+    installation = learner.recipe_installation = adapter.install(model, cfg.recipe, num_layers=2)
+    learner.recipe_state = installation.state
+    learner.setup_optimizer(cfg, model, 0, "cpu")
+    learner.logits = lambda ids: model(F.one_hot(ids, 64).bfloat16())
+    initial_policy = learner.policy_version
+    initial_checkpoint = learner.checkpoint()
+    promoted, initial = down_proj_name(0), down_proj_name(1)
+    before = copy.deepcopy(model.state_dict())
+    trajectory = Trajectory(0, 0, (1, 3), (2,), (-1.0,), "", "stop", initial_policy)
+
+    samples = learner._sample_calibration_inputs([trajectory], 2)
+    assert set(samples) == {initial, promoted}
+    assert len(bf16_calls) == len(megatron_stubs.calls) == 1
+    torch.testing.assert_close(samples[promoted], bf16_calls[0].reshape(2, 64), rtol=0, atol=0)
+    assert installation.report()["calls"] == {initial: 1}
+    scale = torch.linspace(0.5, 2, 64)
+    promoted_policy = learner.apply_calibration({promoted: scale})
+    assert promoted_policy.weight_version == initial_policy.weight_version
+    assert promoted_policy.recipe_id != initial_policy.recipe_id
+    promoted_checkpoint = learner.checkpoint()
+    x = torch.randn(2, 64, dtype=torch.bfloat16, requires_grad=True)
+    for checkpoint, active in [(initial_checkpoint, False), (promoted_checkpoint, True)]:
+        learner.restore(checkpoint)
+        bf16_calls.clear()
+        megatron_stubs.calls.clear()
+        layer.zero_grad()
+        layer(x)[0].float().sum().backward()
+        assert layer.weight.grad is not None
+        assert learner.recipe_state.is_active(promoted) == active
+        if active:
+            assert not bf16_calls and len(megatron_stubs.calls) == 1
+            effective_x, effective_w = megatron_stubs.calls[0]
+            torch.testing.assert_close(effective_x, (x / scale).bfloat16(), rtol=0, atol=0)
+            torch.testing.assert_close(effective_w, (layer.weight * scale).bfloat16(), rtol=0, atol=0)
+        else:
+            assert len(bf16_calls) == 1 and not megatron_stubs.calls
+        torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "recipe,options",
     [

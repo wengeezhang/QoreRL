@@ -1,5 +1,6 @@
 """CPU contract tests with stub kernels; these do not validate native GPU MXFP8."""
 
+import copy
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +14,8 @@ from qorerl.training.contracts import PolicyVersion, WeightSnapshot
 
 
 class _Unquantized:
-    pass
+    def apply(self, layer, x, bias=None):
+        return torch.nn.functional.linear(x, layer.weight, bias)
 
 
 class _Linear(torch.nn.Module):
@@ -298,6 +300,70 @@ def test_smoothquant_worker_refit_verifies_identity_and_rebuilds_effective_weigh
     assert not installed.ready
     with pytest.raises(RuntimeError, match="cache is invalid"):
         target.quant_method.apply(target, x)
+
+
+def test_worker_quantizes_only_active_layers_and_publishes_promoted_scope(stub_runtime, monkeypatch):
+    model, quantized = stub_runtime
+    model.model.layers.append(copy.deepcopy(model.model.layers[0]))
+    model.config.num_hidden_layers = len(model.model.layers)
+    recipe = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [1], "allow_layer_expansion": True})
+    target = model.model.layers[0].mlp.down_proj
+    original_method = target.quant_method
+    installed = adapter.install(model, recipe)
+    candidate_method, initial_method, inactive_method = installed.methods
+    promoted, initial = candidate_method.name, initial_method.name
+    extension = WeightLoaderExtension()
+    extension.model_runner = SimpleNamespace(model=model)
+    extension.qorerl_recipe_installation = installed
+    tensors = {name: value.detach().clone() for name, value in model.named_parameters()}
+    model.load_weights = lambda _: set(tensors)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    source = adapter.RecipeState(recipe)
+    source.add_target(0, target.weight, active=False)
+    source.add_target(1, initial_method.layer.weight)
+    source.add_target(2, inactive_method.layer.weight, active=False)
+    x = torch.randn(2, 128, dtype=torch.bfloat16)
+    bias = torch.randn(128, dtype=torch.bfloat16)
+
+    assert len(quantized) == 1 and candidate_method.carrier is None
+    scanned = []
+    monkeypatch.setattr(adapter, "_validate_weight", lambda weight, name: scanned.append(name))
+    assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
+        source.active_identity
+    )
+    assert scanned == [initial]
+    assert len(quantized) == 2 and candidate_method.carrier is None
+    torch.testing.assert_close(
+        candidate_method.apply(target, x, bias), original_method.apply(target, x, bias)
+    )
+    assert candidate_method.apply_calls == 0
+    initial_method.apply(initial_method.layer, x)
+    report = extension.qorerl_execution_report()
+    assert report["all_targets_executed"] and list(report["targets"]) == [initial]
+    assert [target["canonical_weight"] for target in report["runtime_targets"]] == [initial]
+
+    new_scale = torch.linspace(0.25, 2, 128)
+    source.install_scales({**source.scales, promoted: new_scale})
+    scanned.clear()
+    assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
+        source.active_identity
+    )
+    assert scanned == [promoted, initial]
+    assert installed.state.active_identity == source.active_identity and len(quantized) == 4
+    assert inactive_method.carrier is None
+    torch.testing.assert_close(
+        inactive_method.apply(inactive_method.layer, x),
+        torch.nn.functional.linear(x, inactive_method.layer.weight),
+    )
+    torch.testing.assert_close(quantized[-2], (target.weight * new_scale).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(target.weight, tensors[promoted], rtol=0, atol=0)
+    assert not installed.report()["all_targets_executed"]
+    candidate_method.apply(target, x)
+    initial_method.apply(initial_method.layer, x)
+    torch.testing.assert_close(candidate_method.kernel.last_input, (x / new_scale).bfloat16(), rtol=0, atol=0)
+    report = installed.report()
+    assert report["all_targets_executed"] and set(report["targets"]) == {initial, promoted}
+    assert [entry["apply_calls"] for entry in report["runtime_targets"]] == [1, 1]
 
 
 def test_smoothquant_rollout_requires_worker_ack_of_exact_scale_identity(stub_runtime):

@@ -58,6 +58,7 @@ class RecipeState:
         self.targets = {}
         self._signs = {}
         self._transforms = {}
+        self._initial_scale_targets = set()
         self._scales = {}
         self._scale_digest = None
         self._device_scales = {}
@@ -82,10 +83,15 @@ class RecipeState:
             return f"{self.spec.identity}:{self.scale_digest}"
         return self.spec.identity
 
-    def add_target(self, index, weight):
+    def is_active(self, name):
+        return name in (self._scales if self.spec.uses_smoothquant else self.targets)
+
+    def add_target(self, index, weight, *, active=True):
         name = down_proj_name(index)
         if name in self.targets:
             raise ValueError(f"Duplicate recipe target: {name}")
+        if not active and not self.spec.allow_layer_expansion:
+            raise ValueError("Inactive targets require SmoothQuant layer expansion")
         if weight.ndim != 2 or any(dim <= 0 or dim % 32 for dim in weight.shape):
             raise ValueError(f"MXFP8 target dimensions must be multiples of 32: {name} {weight.shape}")
         if self.spec.uses_hadamard:
@@ -93,15 +99,22 @@ class RecipeState:
                 raise ValueError(f"Hadamard block_size does not divide input channels: {name}")
             self._signs[name] = make_signs(weight.shape[1], self.spec.seed + index)
             self._transforms[name] = PreparedHadamard(self._signs[name], self.spec.hadamard_block_size)
-        if self.spec.uses_smoothquant:
+        if self.spec.uses_smoothquant and active:
+            self._initial_scale_targets.add(name)
             self._scales[name] = torch.ones(weight.shape[1], dtype=torch.float32, device="cpu")
             self._scale_digest = None
         self.targets[name] = tuple(weight.shape)
         return name
 
     def _check_scales(self, scales):
-        if not self.spec.uses_smoothquant or not isinstance(scales, dict) or set(scales) != set(self.targets):
-            raise ValueError("SmoothQuant scale targets must match the entire installed recipe")
+        if (
+            not self.spec.uses_smoothquant
+            or not isinstance(scales, dict)
+            or not self._initial_scale_targets <= scales.keys() <= self.targets.keys()
+        ):
+            raise ValueError(
+                "SmoothQuant scales must cover every initial target and stay within eligible targets"
+            )
         digest = scale_digest(scales)
         for name, value in scales.items():
             if value.shape != (self.targets[name][1],):
@@ -189,10 +202,14 @@ class RecipeState:
         report = {
             **self.spec.to_dict(),
             "identity": self.active_identity,
-            "targets": {name: list(shape) for name, shape in sorted(self.targets.items())},
+            "targets": {
+                name: list(shape) for name, shape in sorted(self.targets.items()) if self.is_active(name)
+            },
             "validation": "experimental_gpu_validation_pending",
             "other_operators": "bf16_baseline",
         }
         if self.spec.uses_smoothquant:
             report.update(scale_digest=self.scale_digest, preset_identity=self.spec.identity)
+        if self.spec.allow_layer_expansion:
+            report["eligible_targets"] = sorted(self.targets)
         return report

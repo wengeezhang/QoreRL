@@ -29,6 +29,7 @@ class CalibrationConfig:
     max_rows: int = 128
     min_relative_improvement: float = 0.0
     scale_artifact: str | None = None
+    max_activation_relative_l2: float | None = None
 
     def __post_init__(self):
         if type(self.refresh_every_optimizer_steps) is not int or self.refresh_every_optimizer_steps < 0:
@@ -55,6 +56,9 @@ class CalibrationConfig:
             raise ValueError("alpha and min_relative_improvement must be in [0, 1]")
         if self.outlier_threshold < 1:
             raise ValueError("outlier_threshold must be >= 1 for the channel peak-to-mean ratio")
+        bound = self.max_activation_relative_l2
+        if bound is not None and (type(bound) not in (int, float) or not math.isfinite(bound) or bound < 0):
+            raise ValueError("max_activation_relative_l2 must be a finite nonnegative number or None")
 
     @classmethod
     def from_dict(cls, options):
@@ -130,7 +134,7 @@ def parse_scale_artifact(artifact, *, model, model_revision, recipe_id, targets=
     return scales
 
 
-def _activation_windows(samples, config):
+def _activation_windows(samples, config, *, active_scales=None):
     if not isinstance(samples, Mapping) or not samples:
         raise ValueError("Outlier reporting requires named activation samples")
     if any(not isinstance(name, str) or not name.strip() for name in samples):
@@ -145,6 +149,9 @@ def _activation_windows(samples, config):
         fit_rows = len(rows) if config.discovery_only else len(rows) // 2
         fit, heldout = rows[:fit_rows], rows[fit_rows:]
         maxima = fit.abs().amax(0).double() if len(fit) else None
+        require_outlier = config.discover_outliers or (
+            active_scales is not None and name not in active_scales
+        )
         score, reason = None, None
         if maxima is None:
             status, reason = "insufficient_rows", "empty_fit_window"
@@ -152,7 +159,7 @@ def _activation_windows(samples, config):
             status, reason = "insufficient_signal", "all_zero_fit_window"
         else:
             score = (maxima.max() / maxima.mean()).item()
-            selected = not config.discover_outliers or score >= config.outlier_threshold
+            selected = not require_outlier or score >= config.outlier_threshold
             status = "discovered" if selected else "not_selected"
         yield (
             name,
@@ -160,7 +167,7 @@ def _activation_windows(samples, config):
             heldout,
             {
                 "target": name,
-                "selection": "outlier" if config.discover_outliers else "explicit",
+                "selection": "outlier" if require_outlier else "explicit",
                 "outlier_score": score,
                 "threshold": config.outlier_threshold,
                 "alpha": config.alpha,
@@ -227,18 +234,31 @@ def _error(fprop, x, weight, scale, reference, reference_norm):
 
 
 @torch.no_grad()
-def prepare(weights, samples, current_scales, config, *, fprop=None):
-    """Return improving scale overrides and per-target evidence, without changing any operand or active state.
+def prepare(weights, samples, current_scales, config, *, fprop=None, allow_layer_expansion=False):
+    """Evaluate active scale refreshes and, when authorized, first activations on eligible BF16 layers.
 
-    Production uses native MXFP8. The CPU fixture explicitly supplies its own
-    FPROP. A zero-error active transform cannot improve and is always retained.
+    Refreshes require a strict held-out gain. Activation requires a detected outlier
+    and reports both direct MXFP8 and fitted SmoothQuant error against BF16.
     """
     if config.discovery_only:
         return {}, outlier_report(samples, config)
-    if not weights or set(weights) != set(samples):
-        raise ValueError("Calibration samples and weights must cover the same nonempty installed scope")
+    if (
+        not isinstance(weights, Mapping)
+        or not weights
+        or not isinstance(samples, Mapping)
+        or (set(weights) != set(samples))
+    ):
+        raise ValueError("Calibration samples and weights must cover the same nonempty scope")
     _check_names(weights)
-    if not isinstance(current_scales, dict) or set(current_scales) != set(weights):
+    if type(allow_layer_expansion) is not bool:
+        raise ValueError("allow_layer_expansion must be boolean")
+    if (
+        not isinstance(current_scales, dict)
+        or not current_scales
+        or not current_scales.keys() <= weights.keys()
+    ):
+        raise ValueError("Active scales must name a nonempty subset of the supplied calibration scope")
+    if not allow_layer_expansion and current_scales.keys() != weights.keys():
         raise ValueError("Active scales must cover the entire supplied calibration scope")
     scale_digest(current_scales)
     if fprop is None:
@@ -246,16 +266,27 @@ def prepare(weights, samples, current_scales, config, *, fprop=None):
 
         fprop = native_mxfp8_linear
     overrides, evidence = {}, []
-    for name, maxima, heldout, event in _activation_windows(samples, config):
+    for name, maxima, heldout, event in _activation_windows(samples, config, active_scales=current_scales):
+        activating = name not in current_scales
+        event["action"] = "activate" if activating else "refresh"
+        if activating:
+            event.update(
+                direct_mxfp8_relative_l2=None, max_activation_relative_l2=config.max_activation_relative_l2
+            )
         evidence.append(event)
         if event["status"] != "discovered":
             continue
-        weight, old = weights[name], current_scales[name]
+        weight = weights[name]
         if not isinstance(weight, torch.Tensor) or weight.ndim != 2 or weight.dtype != torch.bfloat16:
             raise ValueError(f"Expected canonical BF16 weight matrix for {name}")
         weight = weight.detach()
         if not weight.numel() or heldout.shape[1] != weight.shape[1] or heldout.device != weight.device:
             raise ValueError(f"Calibration requires matching input width and device for {name}")
+        old = (
+            torch.ones(weight.shape[1], dtype=torch.float32, device="cpu")
+            if activating
+            else current_scales[name]
+        )
         if old.shape != (weight.shape[1],):
             raise ValueError(f"Active scale width mismatch for {name}")
         if not torch.isfinite(weight).all().item():
@@ -268,8 +299,16 @@ def prepare(weights, samples, current_scales, config, *, fprop=None):
             if norm == 0:
                 event.update(status="insufficient_signal", reason="zero_heldout_reference")
                 continue
-            before = _error(fprop, heldout, weight, old, reference, norm)
-            event["current_relative_l2"] = before
+            if activating:
+                event["current_relative_l2"] = 0.0
+                try:
+                    event["direct_mxfp8_relative_l2"] = _error(fprop, heldout, weight, old, reference, norm)
+                except _NonfiniteProjection as exc:
+                    event.update(status="invalid_candidate", reason=f"Direct MXFP8: {exc}")
+                    continue
+            else:
+                before = _error(fprop, heldout, weight, old, reference, norm)
+                event["current_relative_l2"] = before
             new = _fit_scale(maxima, weight, old, config.alpha)
             if not torch.isfinite(new).all().item() or not (new > 0).all().item():
                 event.update(status="invalid_candidate", reason="scale_outside_positive_fp32_range")
@@ -279,13 +318,17 @@ def prepare(weights, samples, current_scales, config, *, fprop=None):
             except _NonfiniteProjection as exc:
                 event.update(status="invalid_candidate", reason=str(exc))
                 continue
-        improvement = (before - after) / before if before > 0 else None
-        event.update(
-            candidate_relative_l2=after,
-            relative_improvement=improvement,
-            status="no_gain",
-        )
-        if after < before and improvement >= config.min_relative_improvement and not torch.equal(new, old):
-            event["status"] = "proposed"
-            overrides[name] = new
+        event["candidate_relative_l2"] = after
+        if activating:
+            if config.max_activation_relative_l2 is not None and after > config.max_activation_relative_l2:
+                event.update(status="activation_cost_exceeded", reason="above_max_activation_relative_l2")
+                continue
+        else:
+            improvement = (before - after) / before if before > 0 else None
+            event["relative_improvement"] = improvement
+            if after >= before or improvement < config.min_relative_improvement or torch.equal(new, old):
+                event["status"] = "no_gain"
+                continue
+        event["status"] = "proposed"
+        overrides[name] = new
     return overrides, evidence

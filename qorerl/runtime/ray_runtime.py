@@ -12,6 +12,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from qorerl.runtime.calibration import (
     crosses_interval,
+    load_initial_scales,
     load_scales,
     prepare_review,
     read_payload,
@@ -60,7 +61,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
     calibration = cfg.calibration if cfg.recipe_calibration or cfg.recipe.uses_smoothquant else None
     imported = None
     if not resume and calibration and calibration.scale_artifact:
-        imported = load_scales(cfg, json.loads(Path(calibration.scale_artifact).read_text()))
+        imported = load_initial_scales(cfg, json.loads(Path(calibration.scale_artifact).read_text()))
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "config.json", cfg.to_dict())
