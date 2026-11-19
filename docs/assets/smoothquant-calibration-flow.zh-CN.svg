@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1040" viewBox="0 0 1024 1040" role="img" aria-labelledby="title desc" xml:lang="zh-CN">
+  <title id="title">动态 SmoothQuant 的校准与发布流程</title>
+  <desc id="desc">每批先采样、更新并沿用当前缩放发布权重。跨过校准周期后，在更新后的权重上重放本批前缀。可以只发现异常、为已知层直接拟合候选，或在启动时导入已有缩放。候选须在留出输入上通过同层 BF16 参考比较；有候选才保存变更前的检查点，按配置人工或自动确认。learner 安装新缩放，全部 rollout 重建并确认版本后才开始采样。</desc>
+  <defs>
+    <style>
+      text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #142e38; }
+      .title { font-size: 40px; font-weight: 700; }
+      .stage { font-size: 26px; font-weight: 650; }
+      .body { font-size: 19px; fill: #38525b; }
+      .small { font-size: 17px; fill: #48616a; }
+      .label { font-size: 18px; font-weight: 620; }
+      .number { font-size: 16px; font-weight: 700; fill: white; text-anchor: middle; }
+      .rule { stroke: #d6e3e1; stroke-width: 1.3; }
+      .route { fill: none; stroke: #197c73; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+      .enter { fill: none; stroke: #6953ad; stroke-width: 2; stroke-dasharray: 4 5; stroke-linecap: round; }
+      .mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-variant-numeric: tabular-nums; }
+    </style>
+    <marker id="forward" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="m1 1 4.5 3L1 7" fill="none" stroke="#197c73" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="entry" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="m1 1 4.5 3L1 7" fill="none" stroke="#6953ad" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="1022" height="1038" rx="24" fill="#fbfdfc" stroke="#d0dfdd" stroke-width="2"/>
+  <text x="42" y="48" font-size="22" font-weight="740" fill="#126c64">QoreRL</text>
+  <path d="M140 30v21" class="rule"/>
+  <text x="158" y="47" class="small">同步 GRPO 训练架构</text>
+  <text x="42" y="103" class="title">动态 SmoothQuant 的校准与发布</text>
+  <text x="44" y="139" class="body">S 是每个输入通道的缩放系数，控制选定层如何执行 MXFP8 计算。</text>
+
+  <!-- The normal publish completes before calibration is considered. -->
+  <rect x="40" y="168" width="944" height="92" rx="14" fill="#123944"/>
+  <g fill="none" stroke="#83d7c8" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M62 200h24m-24 7h17m-17 7h21"/>
+    <path d="M344 212h5v-8h7v-8h8"/>
+    <path d="M645 203h17m-6-6 7 6-7 6m-11 7h18"/>
+  </g>
+  <g font-size="23" font-weight="640" style="fill:white">
+    <text x="98" y="209" style="fill:white">Rollout 采样</text>
+    <text x="377" y="209" style="fill:white">Learner 更新</text>
+    <text x="681" y="209" style="fill:white">发布本批权重</text>
+  </g>
+  <g font-size="17">
+    <text x="98" y="237" style="fill:#c3dcd9">生成同题多条回答</text>
+    <text x="377" y="237" style="fill:#c3dcd9">按组内优势更新参数</text>
+    <text x="681" y="237" style="fill:#c3dcd9">沿用当前 S，等待 rollout 确认</text>
+  </g>
+  <path d="m293 205 8 8-8 8m296-16 8 8-8 8" fill="none" stroke="#82a9a9" stroke-width="2.5"/>
+
+  <path d="M770 260v13H78q-10 0-10 10v39" class="route" marker-end="url(#forward)"/>
+  <path d="M770 273h32" class="route" marker-end="url(#forward)"/>
+  <circle cx="770" cy="273" r="3.5" fill="#197c73"/>
+  <text x="91" y="303" class="label" style="fill:#11695f">跨过校准周期（默认每 20 次优化器更新）</text>
+  <text x="818" y="279" class="small">未到期，继续采样</text>
+
+  <!-- The vertical rail carries only the path that yields an accepted proposal. -->
+  <path d="M68 359v84 M68 478v144 M68 657v129" class="route"/>
+  <path d="M68 821v112" class="route" marker-end="url(#forward)"/>
+  <line x1="104" y1="420" x2="980" y2="420" class="rule"/>
+  <line x1="104" y1="604" x2="980" y2="604" class="rule"/>
+  <line x1="104" y1="766" x2="980" y2="766" class="rule"/>
+
+  <circle cx="68" cy="342" r="17" fill="#13776c"/>
+  <text x="68" y="348" class="number">1</text>
+  <text x="104" y="350" class="stage">发现异常通道</text>
+  <text x="104" y="383" class="body">用更新后的权重重放本批前缀，检查目标层输入。</text>
+  <path d="M553 348h36" class="route" marker-end="url(#forward)"/>
+  <text x="611" y="349" class="label">只想做诊断？</text>
+  <text x="611" y="381" class="body">写出各层 outlier 分数，沿用当前 S。</text>
+
+  <circle cx="68" cy="461" r="17" fill="#13776c"/>
+  <text x="68" y="467" class="number">2</text>
+  <text x="104" y="469" class="stage">拟合并验证候选 S</text>
+  <text x="104" y="505" class="body">用部分输入拟合 S，用留出的输入比较新旧 S。</text>
+  <text x="104" y="536" class="body">误差以同一层的 BF16 输出为基准。</text>
+  <path d="M132 566H87" class="enter" marker-end="url(#entry)"/>
+  <text x="146" y="571" class="small" style="fill:#634e9e">已知要调哪些层？从拟合开始</text>
+
+  <rect x="582" y="437" width="397" height="151" rx="12" fill="#eef5f3"/>
+  <text x="602" y="465" class="label">CPU 示例 · 局部前向相对误差</text>
+  <text x="602" y="495" class="small">目标层</text>
+  <text x="696" y="495" class="small">当前 S → 候选 S</text>
+  <path d="M602 506h357" class="rule"/>
+  <text x="603" y="532" class="label">层 0</text>
+  <text x="696" y="532" class="mono" font-size="18">7.82% → 4.79%</text>
+  <text x="902" y="532" class="label" style="fill:#0b7163">提议</text>
+  <text x="603" y="566" class="label">层 1</text>
+  <text x="696" y="566" class="mono" font-size="18">3.31% → 3.86%</text>
+  <text x="902" y="566" class="label" style="fill:#53656b">保留</text>
+
+  <circle cx="68" cy="640" r="17" fill="#13776c"/>
+  <text x="68" y="646" class="number">3</text>
+  <text x="104" y="649" class="stage">保存检查点，确认候选</text>
+  <text x="104" y="684" class="body">有层达到改善条件，才保存变更前的状态和候选。</text>
+  <text x="104" y="717" class="body">所有层均未达标时，直接沿用当前 S。</text>
+  <path d="M582 637v89" stroke="#c4b9df" stroke-width="3" stroke-linecap="round"/>
+  <text x="602" y="650" class="label" style="fill:#624e96">人工</text>
+  <text x="659" y="650" class="small">暂停。恢复时接受或拒绝候选。</text>
+  <text x="602" y="685" class="label" style="fill:#624e96">自动</text>
+  <text x="659" y="685" class="small">按预设规则接受达标候选。</text>
+  <text x="602" y="722" class="small">拒绝 → 保留当前 S，继续训练。</text>
+
+  <circle cx="68" cy="804" r="17" fill="#13776c"/>
+  <text x="68" y="810" class="number">4</text>
+  <text x="104" y="813" class="stage">两端应用同一组 S</text>
+  <text x="104" y="849" class="body">Learner 安装 S，导出权重与缩放状态。</text>
+  <text x="104" y="881" class="body">vLLM 按 S 重建目标层的量化权重。</text>
+  <path d="M598 812h-48" class="enter" marker-end="url(#entry)"/>
+  <text x="611" y="817" class="label" style="fill:#624e96">启动时已有 S？</text>
+  <text x="611" y="849" class="body">校验后直接应用，首次采样即生效。</text>
+
+  <!-- Both startup import and an accepted refresh use the same publish barrier. -->
+  <rect x="40" y="937" width="944" height="68" rx="13" fill="#d9eee8"/>
+  <circle cx="69" cy="971" r="13" fill="#157367"/>
+  <path d="m63 971 4 4 8-9" fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="103" y="979" font-size="23" font-weight="650" style="fill:#144f48">全部 rollout 确认同一策略版本</text>
+  <path d="M504 971h61" class="route" marker-end="url(#forward)"/>
+  <text x="603" y="979" font-size="23" font-weight="650" style="fill:#144f48">开始下一批采样</text>
+</svg>
