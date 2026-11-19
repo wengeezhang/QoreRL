@@ -1,110 +1,112 @@
-# QoreRL 设计原则与架构
+# QoreRL design and architecture
 
-## 1. QoreRL 要解决什么问题
+**English** · [简体中文](design.zh-CN.md)
 
-QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。把论文中的方法用到强化学习时，采样端（rollout）要用它生成回答，训练端（learner）要用这些回答更新模型。如果中途改变了某些层的计算方式，用户还需要知道为什么值得改、两端从哪一批开始使用新方案，以及如何恢复到变更前的状态。
+## 1. Why QoreRL uses recipes
 
-QoreRL 把这项工作分给两方。**Recipe 负责数值方法**，定义支持哪些算子、怎样执行，有可调参数时还要说明怎样提出和验证候选。**框架负责变更过程**，按用户给定的范围收集证据、处理审批、保存状态，并记录每批实际使用的策略版本。这样，换一种量化方法时，用户仍然可以用同一套流程决定让它运行在哪里、何时允许改变，以及要凭什么证据接受改变。
+QoreRL packages quantization methods and techniques for reducing quantization error as reproducible **recipes**. In reinforcement learning, the rollout engine uses the policy to generate responses, and the learner uses those responses to update the model. When a layer starts using a different numerical method mid-run, users need to know what evidence justified the change, which batch first used it on both engines, and how to recover the state that preceded it.
 
-## 2. 一份 recipe 怎样进入训练
+**The recipe defines the numerical method.** It specifies which operators it supports, what they compute and, when its parameters can change, how to propose and evaluate an update. **The framework manages changes during training.** It collects evidence within the scope the user authorized, handles approval, saves the training state, and records which policy version produced each batch. This gives different recipes a common way to express where they run, what can change, and what evidence warrants a change.
 
-启动一份 recipe 时，用户先选定基础低精度格式和算子范围，再回答四个问题。如果只想按预设方案训练，确定初始范围即可。启用观测或允许调整时，其余问题才会影响运行行为。
+## 2. How a recipe enters training
 
-![用户先决定初始生效层、观测范围、允许的调整和批准方式。固定方案直接执行，只观测时输出报告，需要调整时才准备候选并在批准后应用。](docs/assets/recipe-lifecycle.zh-CN.svg)
+Start by choosing the base precision and the operators it covers. A fixed recipe can run with just its initial scope and settings. For recipes that support observation or adjustment, four questions describe how much control the framework has during training.
 
-| 用户的决定 | 它在训练中意味着什么 |
+![Four choices govern the recipe lifecycle. A fixed recipe runs as configured. Observation can produce a report. Adaptive recipes can propose and validate a change, then publish it once approved.](docs/assets/recipe-lifecycle.svg)
+
+| User decision | What it controls |
 | --- | --- |
-| **哪些层现在就用这个 recipe？** | 指定第一批开始就做低精度计算的层。如果 recipe 还提供额外变换，可以只在其中一部分层启用。 |
-| **训练期间允许观察哪些层？** | 确定可以采集哪些层的数据。即便某个低精度层尚未启用额外变换，也可以观察它。观测期间继续用当前配置训练。 |
-| **观察之后允许改什么？** | 用户可以只看报告、允许刷新已启用的参数，或允许给范围内的其他层启用同一种变换。可选动作取决于这份 recipe 支持的能力，低精度层名单在运行开始时固定。 |
-| **谁批准这次修改？** | 有合格候选时，可交给用户查看证据后决定，也可由用户预先授权按验证条件自动接受。两种方式受同一组选层和变更权限约束。 |
+| **Where does the recipe take effect in the first batch?** | Select the layers that run in low precision. If the recipe adds a transform, it can start on a subset of those layers. |
+| **Which layers may it observe during training?** | Choose where the framework can collect measurements. Eligible low-precision layers can be observed before they use the transform. Training continues with the active configuration during observation. |
+| **What may change after observation?** | Request a report, allow existing parameters to be refreshed, or let the same transform expand to other eligible layers. The recipe defines which actions it supports. The base set of low-precision layers is fixed at startup. |
+| **Who approves a change?** | Review the evidence yourself, or authorize automatic acceptance of candidates that meet your criteria. Both modes honor the same scope and permissions. |
 
-**同一个流程可以从不同位置进入。** 只想知道哪些层有异常，可以读发现报告并沿用原方案。已经知道目标层，可以在 recipe 允许时跳过筛选，直接为这些层拟合和比较候选。手里已有兼容的离线校准结果，则可以在启动时校验、应用，从第一批起使用。
+**The entry point depends on what you already know.** To identify unusual layers, collect the discovery report and keep the current configuration. With known targets and a recipe that supports fitting, start by fitting and comparing candidates for those targets. With a compatible offline calibration artifact, validate and apply it at startup, ready for the first batch.
 
-对支持周期调整的 recipe，一次观测可以产生零个或多个候选。每个候选应说清要改哪里、改成什么，以及在同一条件下比当前方案好在哪里。没有合格候选，或用户拒绝时，继续使用现行方案。接受后，框架在批次边界应用变更。若变更影响采样端的前向计算，要等两端都切换到新版本，再生成下一批回答。
+For a recipe with periodic updates, an observation can yield zero or more proposals. Each proposal identifies the target, the change, and how the candidate compared with the active configuration under the same conditions. If nothing qualifies or the user declines, training continues with the active configuration. On acceptance, the framework applies the change at a batch boundary. A change to the rollout forward pass takes effect for sampling once the learner and all rollout replicas have switched to the new version.
 
-## 3. 以动态 SmoothQuant 为例
+## 3. Worked example: dynamic SmoothQuant
 
-SmoothQuant 给一个线性层的输入通道配一组缩放因子 `S`。计算时，每个输入通道除以自己的 S，权重的对应列乘以同一个 S，然后量化。对这份 recipe，用户可以控制低精度计算覆盖哪些层、哪些层额外使用 S，以及训练中是否允许更换 S。
+SmoothQuant assigns a scale to each input channel of a linear layer. Before quantization, it divides each input channel by its scale and multiplies the corresponding weight column by that same scale. The vector of scales is `S`. The user chooses which layers run in low precision, which of them also use `S`, and whether those scales may change during training.
 
-### 用户怎样设置范围和权限？
+### How does the user set scope and permissions?
 
-下例选用默认格式 MXFP8，处理 decoder 中的 `mlp.down_proj`，层号从 0 开始。改用实验性的 NVFP4 时，四个问题和选层规则相同。[完整示例配置](configs/grpo_dynamic_smoothquant.json) · [格式与选层实现](qorerl/recipes/spec.py)
+This example selects the decoder's `mlp.down_proj` operators and uses the default format, MXFP8. Layer indices start at zero. The same four questions and selection rules apply to the experimental NVFP4 path. [Example configuration](configs/grpo_dynamic_smoothquant.json) · [Format and layer selection](qorerl/recipes/spec.py)
 
-| 决定 | 示例配置 | 运行行为 |
+| Decision | Example configuration | Runtime behavior |
 | --- | --- | --- |
-| 初始生效层 | `layers: [7,15,20,25]`，`smoothquant_layers: [7,15,20]` | 四层从启动起就跑 MXFP8，其中三层额外使用 S，第 25 层直接跑 MXFP8。 |
-| 观测范围 | `allow_layer_expansion: true`，`refresh_every_optimizer_steps: 20` | 每跨过 20 次实际优化器更新，在随后的同步批边界观测这四层的输入。 |
-| 可提议的变更 | `discover_outliers: true`，`max_activation_relative_l2: 0.05` | 可为前三层刷新 S，也可提议给第 25 层首次加 S。候选的局部输出误差须改善，首次启用还要求候选的相对误差不超过 5%。 |
-| 批准方式 | `approval: "manual"` | 有合格候选时保存并暂停。用户接受或拒绝后从检查点继续。选 `"auto"` 则自动应用满足同样条件的候选。 |
+| Initial scope | `layers: [7,15,20,25]`, `smoothquant_layers: [7,15,20]` | All four layers use MXFP8 from startup. Layers 7, 15 and 20 also use `S`. Layer 25 uses plain MXFP8. |
+| Observation scope | `allow_layer_expansion: true`, `refresh_every_optimizer_steps: 20` | Each time the learner crosses a multiple of 20 optimizer updates, the next synchronous batch boundary triggers observation of inputs to these four layers. |
+| Allowed changes | `discover_outliers: true`, `max_activation_relative_l2: 0.05` | Propose refreshing `S` on the first three layers or activating it on layer 25. The candidate must improve local output error. First-time activation also requires relative error at or below 5%. |
+| Approval | `approval: "manual"` | When a candidate qualifies, save a checkpoint and pause. The user accepts or rejects it at resume. With `"auto"`, candidates that meet the same criteria are applied automatically. |
 
-同一份 recipe 也可以用得更简单。已有离线 S 时，提供 `scale_artifact` 并设 `refresh_every_optimizer_steps: 0`，训练全程使用导入的配置。只想看异常时可选 `discovery_only: true`。若只允许刷新现有 S，沿用默认的 `allow_layer_expansion: false`，校准只覆盖初始启用 S 的层。[各使用场景与配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
+For a fixed run with offline scales, supply `scale_artifact` and set `refresh_every_optimizer_steps: 0`. For an outlier report, set `discovery_only: true`. To allow scale refreshes only on layers already using SmoothQuant, keep the default `allow_layer_expansion: false`. This limits calibration to the initially smoothed layers. [Configurations for each use case](docs/recipes/dynamic-smoothquant.md)
 
 <a id="smoothquant-expansion"></a>
 
-### 动态扩展时，第 25 层什么时候用上 SmoothQuant？
+### When does layer 25 start using SmoothQuant?
 
-| 时刻 | 第 7、15、20 层 | 第 25 层 | 第 23 层等名单外层 |
+| Stage | Layers 7, 15 and 20 | Layer 25 | Layer 23 and other layers outside the scope |
 | --- | --- | --- | --- |
-| 第一次采样 | MXFP8 + SmoothQuant | 直接 MXFP8 | BF16 |
-| 到达校准周期 | 对入选层比较旧 S 和候选 S | 若发现 outlier，拟合 S，并比较直接 MXFP8 与 MXFP8 + 候选 S | 保持 BF16，不参与本轮校准 |
-| 候选待审 | 继续使用已发布的 S | 继续直接 MXFP8 | BF16 |
-| 批准并发布 | 应用获批的刷新 | 若获批，所有采样副本确认后，从下一批开始用 MXFP8 + SmoothQuant | BF16 |
-| 后续校准 | 可继续刷新 S | 已启用后可继续刷新 S | BF16 |
+| First rollout | MXFP8 + SmoothQuant | Plain MXFP8 | BF16 |
+| Calibration due | Compare current and candidate scales on the selected targets | If discovery finds an outlier, fit scales and compare plain MXFP8 with MXFP8 + candidate scales | BF16, outside calibration |
+| Candidate awaiting review | Published scales remain active | Plain MXFP8 | BF16 |
+| Approval and publication | Apply approved scale refreshes | If approved, use MXFP8 + SmoothQuant in the next batch after every rollout replica acknowledges the update | BF16 |
+| Later calibration | Eligible for further refreshes | Eligible for scale refreshes after activation | BF16 |
 
-**发现 outlier 只说明这一层值得试。** Learner 用更新后的权重重放刚训练的轨迹前缀，一部分输入用于拟合 S，留出另一部分输入做比较。对同一层、同一权重、同一份留出输入，分别计算当前方案和候选方案相对 BF16 输出的误差。在仓库的另一个固定范围 CPU 示例中，两层都出现了 outlier。换 S 后，一层的误差从 7.82% 降到 4.79%，另一层从 3.31% 升到 3.86%，所以只有第一层进入候选。这个比较能支持一次局部数值决策，端到端奖励和成本还需在训练任务上验证。[候选验证与示例数据](docs/recipes/dynamic-smoothquant.zh-CN.md)
+**An outlier identifies a layer worth testing.** The learner replays trajectory prefixes from the batch it just trained on, using the updated weights. It fits the scales on some of the inputs and holds out others for comparison. For a given layer, both configurations use the same weights and held-out inputs, and both are compared with the same BF16 output. In a separate fixed-scope CPU example, two layers had outliers. New scales reduced relative error from 7.82% to 4.79% on one layer and increased it from 3.31% to 3.86% on the other. Only the first qualified. This comparison supports a local numerical decision. End-to-end reward and cost require a training run. [Candidate evaluation and example data](docs/recipes/dynamic-smoothquant.md)
 
-### 只换 S，为什么还要重新发布？
+### Why publish again when only the scales change?
 
-假设第 7 层的原始权重 W 刚刚同步，用户随后接受了新的 S。下一次前向时，learner 会用新 S 计算 `X / S` 和 `W * S`。此时 vLLM 仍缓存着按**旧 S** 处理过的权重。即使 W 完全相同，采样端也需要拿到新 S 并重建缓存，才能与 learner 执行同一方案。这次发布后，权重代次保持不变，采样版本会随新的 S 更新。 [训练端适配](qorerl/recipes/megatron_mxfp8.py) · [采样端适配](qorerl/recipes/vllm_mxfp8.py)
+Suppose layer 7's weights `W` have just been synchronized, and the user then accepts new scales. On the next forward pass, the learner computes `X / S` and `W * S` with the new values. vLLM still has weights cached using the **old scales**. Even though the underlying `W` is identical, rollout needs the new scales to rebuild its cache and execute the same transform as the learner. This publication preserves the weight version and changes the effective policy version. [Learner adapter](qorerl/recipes/megatron_mxfp8.py) · [Rollout adapter](qorerl/recipes/vllm_mxfp8.py)
 
 <details>
-<summary>查看动态 SmoothQuant 从校准到发布的完整流程图</summary>
+<summary>See the SmoothQuant calibration and publication workflow</summary>
 
-![每批先采样、更新和发布权重。到达校准周期后发现异常、比较候选。接受变更后发布新的 S，等待全部 rollout 确认后继续采样。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)
+![Each batch starts with rollout, training, and weight publication. At calibration time the learner compares candidate scales. After approval, both engines install the new scales and all rollout replicas acknowledge the version before sampling resumes.](docs/assets/smoothquant-calibration-flow.svg)
 
 </details>
 
-## 4. 框架怎样执行这套流程
+## 4. How the framework runs a recipe
 
-QoreRL 当前的原生实现采用同步 GRPO。**编排端安排工作，Ray worker 承接远程调用，后端引擎完成数值计算。** 引入新方法时，它的量化算子、需要保存的参数、候选比较逻辑由 recipe 及其后端适配实现。编排端决定什么时候发布、发布给哪些副本、什么时候开始下一批采样。
+The current native runtime uses synchronous GRPO. **The driver schedules work, Ray workers handle remote calls, and backend engines perform the computation.** A new recipe and its backend adapters implement its numerical operators, state, and candidate comparisons. The driver decides when to publish, which replicas receive the update, and when the next rollout can start.
 
-![同步 GRPO 系统架构。编排端协调 Ray learner 与 rollout worker，训练端更新并导出策略快照，采样端安装并确认版本后才能开始下一批。](docs/assets/framework-architecture.zh-CN.svg)
+![The synchronous GRPO driver coordinates Ray learner and rollout workers. The learner exports a versioned snapshot. All rollout workers install and acknowledge it before the next batch.](docs/assets/framework-architecture.svg)
 
-### 一批训练由谁负责？
+### Who owns each part of a training batch?
 
-Rollout 为每道题生成一组回答。编排端核对策略版本与分组完整性，计算奖励和组内优势，再把训练批交给 learner。Learner 更新后导出权重和 recipe 状态。编排端把同一个快照的 Ray 对象引用交给所有 rollout 副本，收齐安装确认后再开始下一批。到达校准周期时，候选评估发生在这次常规权重发布之后。[同步训练主循环](qorerl/runtime/ray_runtime.py)
+Rollout generates a group of responses for each prompt. The driver checks the policy version and group completeness, computes rewards and group-relative advantages, and sends the training batch to the learner. After updating, the learner exports the weights and recipe state. The driver passes a Ray object reference to the same snapshot to every rollout replica and waits for all installation acknowledgements before the next batch. When calibration is due, candidate evaluation follows this regular weight publication. [Synchronous GRPO training loop](qorerl/runtime/ray_runtime.py)
 
-| 职责 | 负责什么 | 代码入口 |
+| Component | Responsibility | Implementation |
 | --- | --- | --- |
-| 训练编排 | 调度采样、更新和发布，在批次边界触发校准、保存或暂停 | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
-| Ray worker | 持有各自的引擎、接收远程调用、报告就绪状态与版本 | [ray_workers.py](qorerl/runtime/ray_workers.py) |
-| 后端引擎 | Megatron / Transformer Engine 执行训练并导出权重，vLLM 安装权重并生成回答 | [Megatron learner](qorerl/engines/megatron.py) · [vLLM rollout](qorerl/engines/vllm.py) |
-| 精度 recipe | 定义选层和数值变换，保存变换状态。支持校准的方法还负责生成并验证候选 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [校准](qorerl/recipes/calibration.py) |
-| 任务、算法与数据 | 实现任务和奖励、组内优势、loss、轨迹校验和批处理 | [任务](qorerl/training/tasks.py) · [目标函数](qorerl/training/objective.py) · [轨迹协议](qorerl/training/contracts.py) · [批处理](qorerl/training/batching.py) |
-| 独立观测 | Recipe Insights 在采集的操作数上重放固定方案，记录逐层误差和耗时 | [Recipe Insights](docs/recipe-insights.zh-CN.md) |
+| Training driver | Schedule rollout, training and publication. Trigger calibration, checkpointing or a pause at a batch boundary. | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
+| Ray workers | Own their engines, service remote calls, report readiness and acknowledge versions. | [ray_workers.py](qorerl/runtime/ray_workers.py) |
+| Backend engines | Megatron and Transformer Engine train the model and export weights. vLLM installs weights and generates responses. | [Megatron learner](qorerl/engines/megatron.py) · [vLLM rollout](qorerl/engines/vllm.py) |
+| Precision recipe | Select layers, define transforms and preserve their state. Recipes that support calibration also propose and evaluate changes. | [Specification](qorerl/recipes/spec.py) · [State](qorerl/recipes/state.py) · [Calibration](qorerl/recipes/calibration.py) |
+| Task, algorithm and data | Define tasks, rewards, group-relative advantages, the loss, trajectory validation, and batches. | [Tasks](qorerl/training/tasks.py) · [Objective](qorerl/training/objective.py) · [Trajectory contracts](qorerl/training/contracts.py) · [Batching](qorerl/training/batching.py) |
+| Observability | Recipe Insights replays fixed configurations on captured operands to record per-layer errors and timings. | [Recipe Insights](docs/recipe-insights.md) |
 
-### 哪个版本在生效，训练从哪里恢复？
+### Which version is active, and where can training resume?
 
-每批轨迹带有 `PolicyVersion(weight_version, recipe_id)`。前者标识权重的发布代次，后者标识 recipe。动态 SmoothQuant 的 `recipe_id` 还包含已生效的各层 S 的内容摘要。因此只改 S 也会得到一个可区分的策略版本。Learner 保留原坐标系下的参数和优化器状态，rollout 按新状态更新用于推理的权重缓存。若发布失败，编排端停止运行，并在故障记录中给出最近的完整恢复点。[版本标识](qorerl/recipes/state.py) · [加载和确认](qorerl/engines/vllm.py)
+Each batch of trajectories carries a `PolicyVersion(weight_version, recipe_id)`. The first field identifies the generation of published model weights. The second identifies the recipe. For dynamic SmoothQuant, the recipe ID includes a digest of the active per-layer scales, so changing only the scales gives the policy a distinct version. The learner keeps parameters and optimizer state in their original coordinates. Rollout rebuilds the inference weight cache for the new state. If publication fails, the driver stops the run and records the most recent complete recovery checkpoint. [Version identity](qorerl/recipes/state.py) · [Installation and acknowledgement](qorerl/engines/vllm.py)
 
-有待审候选时，框架把候选及证据绑定到**应用变更之前**的检查点。接受和拒绝都能从这个位置继续，人工和自动批准走同一条发布路径。恢复时还会检查 recipe 是否兼容。早期允许将 BF16 层升级为 MXFP8 的扩层检查点与当前选层规则不兼容，使用新规则需重新开始运行。[审核与恢复](qorerl/runtime/calibration.py) · [兼容性检查](qorerl/runtime/checkpoint.py)
+When a candidate is awaiting review, the framework binds the proposal and its evidence to a checkpoint taken **before applying the change**. Users can resume from that point after either accepting or rejecting it. Manual and automatic approvals use the same publication path. Resume also checks recipe compatibility. Legacy expansion checkpoints that allowed BF16 layers to switch to MXFP8 require a fresh run with the current layer-selection rules. [Review and resume](qorerl/runtime/calibration.py) · [Compatibility checks](qorerl/runtime/checkpoint.py)
 
-### 一次人工确认会写下哪些文件？
+### Which files record a manual review?
 
-下面缩成三层 CPU 模拟。第 0、1 层启用 MXFP8，初始只给第 1 层加 SmoothQuant。第 2 层在低精度范围之外。为演示审核，测试把校准周期设为一次优化器更新。第一批训练结束后，框架提议让第 0 层也启用 SmoothQuant，此时训练暂停。打开这次运行的输出目录，按下面的顺序读就能还原经过。[生成这些文件的测试](tests/test_calibration_workflow.py)
+Consider a three-layer CPU simulation. Layers 0 and 1 use MXFP8 and only layer 1 starts with SmoothQuant. Layer 2 is outside the low-precision scope. To exercise review, the test sets the calibration interval to one optimizer update. After the first training batch, the framework proposes enabling SmoothQuant on layer 0 and pauses. The following files tell the story in order. [Test that produces these artifacts](tests/test_calibration_workflow.py)
 
-| 想知道什么 | 去哪里看 | 本例读到什么 |
+| Question | File | What the example records |
 | --- | --- | --- |
-| 训练为什么停了，从哪里继续？ | 运行目录的 `summary.json` | `status` 是 `awaiting_review`。`checkpoint` 指向 `checkpoints/step-000001-before-calibration/`，`candidate_id` 是接受或拒绝时要传的完整 ID。 |
-| 保存时实际生效的是哪个版本？ | 上述检查点的 `metadata.json` | 第 1 批的权重已经发布，第 0、1 层执行低精度计算，此时只有第 1 层启用 SmoothQuant。`policy_version` 标识当时生效的策略，`pending_candidate` 指向待审提案。普通检查点也有这份元数据，只有带候选的检查点才有这个字段和同目录的 `candidate.json`。 |
-| 这次准备改哪一层，凭什么改？ | 同一检查点的 `candidate.json` | `evidence` 记录所有被评估的层。第 0 层为 `proposed`，第 1 层为 `no_gain`，第 2 层在范围外，证据中没有它的记录。真正要发布的新 S 只出现在 `scale_artifact.scales` 的第 0 层条目里。 |
-| 用户的决定生效了吗？ | 运行目录的 `calibration.jsonl`，每行一个事件 | 原目录依次记录 `evaluated`、`awaiting_review`。人工接受并续训后，**新输出目录**记录 `applied`，选择拒绝则记录 `rejected`。接受分支的第 2 批在 `trajectories.jsonl` 中，每条轨迹的 `policy_version` 都与 `applied.policy` 一致。 |
+| Why did training pause, and where can it resume? | Run directory, `summary.json` | The status is `awaiting_review`. The `checkpoint` field points to `checkpoints/step-000001-before-calibration/`. Pass the full `candidate_id` when accepting or rejecting. |
+| What was active when the checkpoint was written? | Checkpoint directory, `metadata.json` | The first batch's weights have been published. Layers 0 and 1 use low precision, and only layer 1 uses SmoothQuant. The active version is in `policy_version`. Checkpoints with a pending proposal also contain `pending_candidate` and a sibling `candidate.json`. |
+| Which layers would change, and why? | Same checkpoint, `candidate.json` | The `evidence` list contains every evaluated layer. Layer 0 is `proposed`, layer 1 is `no_gain`, and layer 2 is outside the scope. The only entry in `scale_artifact.scales` is the new scale vector for layer 0. |
+| Did the decision take effect? | Run directory, `calibration.jsonl`, one event per line | The original run records `evaluated` followed by `awaiting_review`. On resume, the **new output directory** records `applied` or `rejected`. After acceptance, each trajectory in the second batch carries the `policy_version` recorded in `applied.policy`. |
 
 <details>
-<summary>展开查看这次暂停写入的实际 JSON</summary>
+<summary>Inspect the JSON written for this pause</summary>
 
-以下节选保留实际字段和值。`metadata.json` 还保存了用于续训兼容性检查的完整 `config`。这里的 `boundary` 表示所有 rollout 已确认当前版本，且没有在途样本。
+These excerpts preserve the recorded field names and values. The full `metadata.json` also stores the configuration used to check resume compatibility. The `boundary` field records that all rollout replicas have acknowledged the current version and there are no samples in flight.
 
 ```json
 {
@@ -119,7 +121,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 }
 ```
 
-`candidate.json` 下面只展示第 0 层的证据和该层 32 个通道中前 3 个 S。相对 L2 误差都以同一份 BF16 输出为参照。第 0 层当前是直接 MXFP8，误差为 7.82%。加上候选 S 后降至 4.79%，相对降幅为 38.74%。
+The excerpt from `candidate.json` shows the evidence for layer 0 and the first three of its 32 channel scales. Both relative L2 errors use the same BF16 output as the reference. On layer 0, plain MXFP8 has 7.82% relative error. With the candidate scales, it drops to 4.79%, a relative improvement of 38.74%.
 
 ```json
 {
@@ -149,7 +151,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 }
 ```
 
-运行目录的 `summary.json` 给出这次要审核的 ID，可直接传给 `--accept-candidate` 或 `--reject-candidate`。
+The run's `summary.json` contains the full ID to pass to `--accept-candidate` or `--reject-candidate`.
 
 ```json
 {
@@ -159,14 +161,14 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 }
 ```
 
-续训时，`--resume` 接收整个检查点目录。框架校验候选内容算出的 ID 是否等于 `metadata.pending_candidate`、候选的 `source_policy` 是否等于 `metadata.policy_version`，以及同目录的 `learner.pt` 内容摘要是否等于 `candidate.checkpoint_sha256`。这样确认的就是当时看到的提案，恢复的也是与它配套的模型和优化器状态。[检查点写入](qorerl/runtime/checkpoint.py) · [续训校验](qorerl/runtime/calibration.py) · [接受或拒绝的命令示例](docs/recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)
+Pass the checkpoint directory to `--resume`. The framework computes the candidate's ID and checks it against `metadata.pending_candidate`, checks its `source_policy` against `metadata.policy_version`, and compares the digest of the sibling `learner.pt` with `candidate.checkpoint_sha256`. These checks pair the reviewed proposal with the model and optimizer state that produced it. [Checkpoint writer](qorerl/runtime/checkpoint.py) · [Resume checks](qorerl/runtime/calibration.py) · [Accept or reject a candidate on CPU](docs/recipes/dynamic-smoothquant.md#manual-review-on-cpu)
 
 </details>
 
-要从审批追到实际采样的那一批，可以继续查运行目录里的记录。[运行文件写入位置](qorerl/runtime/ray_runtime.py)
+The other run files connect that decision to the batch it affected. [Run artifact writer](qorerl/runtime/ray_runtime.py)
 
-| 文件 | 什么时候看 |
+| Files | When to use them |
 | --- | --- |
-| `config.json`、`recipe.json`、`workers.json` | 复核启动条件时，分别查看解析后的训练配置、recipe 的规格及初始选层、实际启动的进程。本例 `recipe.json` 中的 `layers: [0,1]` 是固定的低精度范围，`smoothquant_layers: [1]` 是最初使用 S 的层。后续 S 的覆盖范围可从发布记录中核对。 |
-| `metrics.jsonl`、`trajectories.jsonl` | 排查某个训练批时，前者每批一行，包含 `reward_mean`、`clip_fraction` 等。后者保留该批实际采样的 token、行为策略 log-prob、版本，以及对应的奖励与优势。 |
-| `recipe_metrics.jsonl`、`incident.json` | 启用 Recipe Insights 且产生逐层观测时，前者记录局部比较。训练运行异常退出时，后者记录异常类型、消息和最近的恢复点 `last_recovery_checkpoint`。正常等待审核属于 `summary.json` 的状态。 |
+| `config.json`, `recipe.json`, `workers.json` | Check the resolved training configuration, the initial recipe specification and layer selection, and the processes that started. In this example, `layers: [0,1]` is the fixed low-precision scope, and `smoothquant_layers: [1]` is the initial set of smoothed layers. Publication records track subsequent changes to the scales and their coverage. |
+| `metrics.jsonl`, `trajectories.jsonl` | Inspect a specific batch. The first file records one row per batch with metrics such as `reward_mean` and `clip_fraction`. The second records sampled tokens, behavior-policy log probabilities, policy versions, rewards and advantages. |
+| `recipe_metrics.jsonl`, `incident.json` | Recipe Insights writes local comparisons when enabled and when it observes a layer. If training exits on an error, the incident file records the error type, message, and `last_recovery_checkpoint`. A normal pause for review appears in `summary.json`. |

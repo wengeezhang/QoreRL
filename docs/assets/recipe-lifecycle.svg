@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="634" viewBox="0 0 900 634"
+     role="img" aria-labelledby="title desc" xml:lang="en">
+  <title id="title">Recipe lifecycle</title>
+  <desc id="desc">Choose initial layers, observation scope, allowed changes and approval mode. Run a fixed recipe, collect observations, or evaluate changes. For adaptive recipes, validate and approve a candidate, publish it, then sample the next batch once all replicas acknowledge the new version. Keep current settings when no candidate qualifies or approval is declined.</desc>
+  <defs>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --paper: #fbfdfc; --edge: #cfdedc; --ink: #172f39; --muted: #3f5960;
+        --panel: #f0f5f5; --bar: #153c46; --bar-ink: #f5fffd; --mint: #8cdbcd;
+        --route: #257d73; --adapt: #edf7f4; --adapt-edge: #a6cfc5;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --paper: #12232c; --edge: #3a525a; --ink: #eef6f7; --muted: #bfd0d4;
+          --panel: #1d323b; --bar: #234d54; --bar-ink: #f5fffd; --mint: #a4e3d9;
+          --route: #83d4c4; --adapt: #183a3b; --adapt-edge: #426e69;
+        }
+      }
+      svg { fill: var(--ink); }
+      text {
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "PingFang SC",
+          "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      }
+      .page { fill: var(--paper); stroke: var(--edge); stroke-width: 1.5; }
+      .panel { fill: var(--panel); }
+      .division { stroke: var(--edge); stroke-width: 1.25; }
+      .title { font-size: 34px; font-weight: 700; }
+      .label { font-size:20px; font-weight: 650; }
+      .body { font-size: 18px; fill: var(--muted); }
+      .route { fill: none; stroke: var(--route); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .branch { fill: var(--paper); stroke: var(--route); stroke-width: 2; }
+      .arrow { fill: none; stroke: var(--route); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="m2 1 4 3-4 3" class="arrow"/>
+    </marker>
+  </defs>
+
+  <rect x="1" y="1" width="898" height="632" rx="22" class="page"/>
+  <text x="30" y="52" class="title">Recipe lifecycle</text>
+
+  <!-- The choices are independent. Observation and approval apply when enabled. -->
+  <rect x="28" y="77" width="844" height="85" rx="12" class="panel"/>
+  <path d="M236 92v55 M447 92v55 M658 92v55" class="division"/>
+  <g class="label">
+    <text x="47" y="112">Where to apply?</text>
+    <text x="255" y="112">Where to observe?</text>
+    <text x="466" y="112">What may change?</text>
+    <text x="677" y="112">Who approves?</text>
+  </g>
+  <g class="body">
+    <text x="47" y="142">Operators and layers</text>
+    <text x="255" y="142">Observation scope</text>
+    <text x="466" y="142">Targets and changes</text>
+    <text x="677" y="142">User or preset rules</text>
+  </g>
+
+  <rect x="28" y="182" width="844" height="58" rx="12" fill="var(--bar)"/>
+  <path d="m48 201 13 10-13 10z" fill="var(--mint)"/>
+  <text x="78" y="220" style="font-size:24px; font-weight:650; fill:var(--bar-ink)">Learner and rollout start with the selected configuration</text>
+
+  <!-- Three branches from the active recipe. -->
+  <path d="M54 240v186q0 8 8 8h18 M54 282h26 M54 351h26" class="route"/>
+  <circle cx="54" cy="282" r="4" class="branch"/>
+  <circle cx="54" cy="351" r="4" class="branch"/>
+
+  <rect x="80" y="254" width="792" height="56" rx="10" class="panel"/>
+  <text x="101" y="290" class="label">Fixed</text>
+  <path d="M220 267v30" class="division"/>
+  <text x="242" y="289" class="body">Use preset parameters or imported state for every batch.</text>
+
+  <rect x="80" y="323" width="792" height="56" rx="10" class="panel"/>
+  <text x="101" y="359" class="label">Observe</text>
+  <path d="M220 336v30" class="division"/>
+  <text x="242" y="358" class="body">Report measurements and continue with the current settings.</text>
+
+  <rect x="80" y="395" width="792" height="213" rx="13" fill="var(--adapt)" stroke="var(--adapt-edge)" stroke-width="1.4"/>
+  <text x="101" y="438" style="font-size:24px; font-weight:650">Adaptive recipes</text>
+  <text x="850" y="437" text-anchor="end" class="body" style="font-size:16px">Keep current settings if no candidate qualifies or approval is declined.</text>
+  <path d="M102 453h748" style="fill:none; stroke:var(--adapt-edge); stroke-width:1.2"/>
+  <g class="label">
+    <text x="101" y="490">Find targets</text>
+    <text x="299" y="490">Validate</text>
+    <text x="484" y="490">Approve</text>
+    <text x="671" y="490">Publish</text>
+  </g>
+  <g class="route" marker-end="url(#arrow)">
+    <path d="M227 482h45"/>
+    <path d="M403 482h54"/>
+    <path d="M588 482h56"/>
+  </g>
+  <g class="body">
+    <text x="101" y="519">Discover outliers or</text>
+    <text x="101" y="543">use known targets</text>
+    <text x="299" y="519">Compare with the</text>
+    <text x="299" y="543">active settings</text>
+    <text x="484" y="519">Save the evidence</text>
+    <text x="484" y="543">and checkpoint</text>
+    <text x="671" y="519">Install on all</text>
+    <text x="671" y="543">rollout replicas</text>
+  </g>
+  <path d="M814 553v24H131v-20" class="route" marker-end="url(#arrow)"/>
+  <rect x="249" y="560" width="456" height="33" fill="var(--adapt)"/>
+  <text x="477" y="582" text-anchor="middle" class="body">Continue training and repeat at the next evaluation</text>
+</svg>

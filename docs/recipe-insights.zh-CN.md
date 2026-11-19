@@ -1,6 +1,8 @@
 # 训练中的 Recipe Insights
 
-Recipe Insights 在真实 learner 计算中截取少量输入和当前权重，配对比较 **BF16、MXFP8、MXFP8 + Hadamard** 的局部前向输出误差与耗时，并提供按层查看的实时页面和独立 HTML 报告。默认关闭；当前只支持原生 Megatron MXFP8 recipe，**原生 GPU 执行与结果仍待验证**。
+[English](recipe-insights.md) · **简体中文**
+
+Recipe Insights 在真实 learner 计算中截取少量输入和当前权重，配对比较 **BF16、MXFP8、MXFP8 + Hadamard** 的局部前向输出误差与耗时，并提供按层查看的实时页面和独立 HTML 报告。默认关闭；当前支持原生 Megatron 的直接 MXFP8 和固定 Hadamard MXFP8 recipe，**原生 GPU 执行与结果仍待验证**。
 
 ![Recipe Insights 合成数据预览](assets/recipe-insights-demo.png)
 

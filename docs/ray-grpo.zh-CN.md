@@ -1,5 +1,7 @@
 # Ray + Megatron + vLLM：第一条 GRPO 训练链路
 
+[English](ray-grpo.md) · **简体中文**
+
 这条链路默认在选定层执行直接 MXFP8。仓库提供显式 BF16 对照、[直接量化 / 固定 Hadamard](recipes/mxfp8-hadamard.zh-CN.md) 和[动态 SmoothQuant](recipes/dynamic-smoothquant.zh-CN.md) 配置。SmoothQuant 可以按用户授权扩大缩放覆盖，通用自动修复仍是长期目标。
 
 **验证状态：本地 CPU 的真实 Ray 多进程训练已运行；Megatron + vLLM 适配器已实现，但尚未在 NVIDIA GPU 上验证。** CPU 测试不会假装调用这两个 GPU 引擎，也不能证明它们的数值一致性、性能或 API 组合在真实环境中全部可用。
@@ -107,7 +109,7 @@ uv run qorerl train \
 
 恢复时新建 actor，加载 learner 的完整训练状态，重新导出并同步权重，再生成新轨迹。续训输出写到新目录，原实验不覆盖。
 
-目前只允许改变总步数、checkpoint 频率、RPC timeout 和 actor runtime environment；学习率、batch、recipe、模型版本等语义变化会拒绝。**这里实现的是同配置恢复；用户修改量化 recipe 后恢复的工作流尚未实现。** CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
+续训时可以改变总步数、checkpoint 频率、RPC timeout、worker 的 runtime environment 和观测配置。学习率、batch、模型版本和 recipe 身份等训练语义须与检查点一致。若检查点绑定了待审 SmoothQuant 提案，用户可以在续训时接受或拒绝这次缩放变更。详见[人工确认示例](recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)。 CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
 
 MXFP8 recipe 的同步和恢复会另外核对实际 target 形状和固定 signs，再重建 rollout 派生缓存。参数与 optimizer 保持原始坐标系。首组 recipe 的执行条件与对照命令见 [recipe 文档](recipes/mxfp8-hadamard.zh-CN.md)。
 

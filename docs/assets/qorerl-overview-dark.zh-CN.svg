@@ -1,0 +1,70 @@
+<svg xml:lang="zh-CN" xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820" role="img" aria-labelledby="title desc">
+  <title id="title">QoreRL — Low precision. More control.</title>
+  <desc id="desc">QoreRL 的项目愿景。首期将量化与误差缓解方法整理成经过验证、可组合的 recipe。用户可以观测训练质量、数值稳定性和成本，在告警时暂停保存，查看证据、调整配置并继续训练。长期目标是根据反馈自动调整精度。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L5.5 3.5 L1 6" fill="none" stroke="#6BD9C5" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+    <marker id="arrow-purple" markerWidth="7" markerHeight="7" refX="5.5" refY="3.5" orient="auto" markerUnits="strokeWidth"><path d="M1 1 L5.5 3.5 L1 6" fill="none" stroke="#B9A6FF" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></marker>
+  </defs>
+  <rect width="1440" height="820" rx="26" fill="#0B1120"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', Arial, sans-serif">
+
+<text x="56" y="69" font-size="34" font-weight="700"><tspan fill="#B9A6FF">Qore</tspan><tspan fill="#EDF3FF">RL</tspan></text>
+<rect x="1150" y="37" width="234" height="40" rx="20" fill="#141E31" stroke="#34415B" stroke-width="1.5"/>
+<text x="1267" y="63" font-size="16" font-weight="600" fill="#B4C1D8" text-anchor="middle" letter-spacing="1.8">项目愿景</text>
+<text x="56" y="140" font-size="52" font-weight="700" fill="#EDF3FF" text-anchor="start" letter-spacing="-1.4">Low precision. More control.</text>
+<text x="58" y="183" font-size="25" font-weight="400" fill="#B4C1D8" text-anchor="start">把量化与误差缓解研究用到强化学习训练中</text>
+<rect x="56" y="234" width="354" height="408" rx="20" fill="#141E31" stroke="#34415B" stroke-width="1.5"/>
+<rect x="438" y="234" width="568" height="408" rx="20" fill="#141E31" stroke="#34415B" stroke-width="1.5"/>
+<rect x="1034" y="234" width="350" height="408" rx="20" fill="#10192A" stroke="#34415B" stroke-width="1.5" stroke-dasharray="6 6"/>
+<rect x="80" y="257" width="30" height="4" rx="2" fill="#B9A6FF" stroke="none" stroke-width="1.5"/>
+<rect x="462" y="257" width="30" height="4" rx="2" fill="#6BD9C5" stroke="none" stroke-width="1.5"/>
+<rect x="1058" y="257" width="30" height="4" rx="2" fill="#A3B2CC" stroke="none" stroke-width="1.5"/>
+<text x="80" y="294" font-size="17" font-weight="700" fill="#B9A6FF" text-anchor="start" letter-spacing="1">01 / RECIPE 库</text>
+<text x="462" y="294" font-size="17" font-weight="700" fill="#6BD9C5" text-anchor="start" letter-spacing="1">02 / 训练与恢复</text>
+<text x="1058" y="294" font-size="16" font-weight="600" fill="#B4C1D8" text-anchor="start" letter-spacing="0.55">03 / 长期研究</text>
+<text x="80" y="335" font-size="28" font-weight="700" fill="#EDF3FF" text-anchor="start" letter-spacing="-0.6">让研究方法可复用</text>
+<text x="462" y="335" font-size="30" font-weight="700" fill="#EDF3FF" text-anchor="start" letter-spacing="-0.7">观测、调整、继续训练</text>
+<text x="1058" y="335" font-size="28" font-weight="600" fill="#EDF3FF" text-anchor="start" letter-spacing="-0.5">根据训练反馈</text>
+<text x="1058" y="370" font-size="28" font-weight="600" fill="#EDF3FF" text-anchor="start" letter-spacing="-0.5">自动调整精度</text>
+<rect x="80" y="377" width="306" height="83" rx="12" fill="#0B1120" stroke="none" stroke-width="1.5"/>
+<text x="99" y="411" font-size="22" font-weight="500" fill="#EDF3FF" text-anchor="start">低精度量化方法</text>
+<text x="99" y="441" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="start">+ 量化误差缓解技术</text>
+<path d="M233 469 V491" fill="none" stroke="#B9A6FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-purple)"/>
+<rect x="80" y="501" width="306" height="74" rx="12" fill="#292343" stroke="none" stroke-width="1.5"/>
+<text x="233" y="532" font-size="23" font-weight="600" fill="#B9A6FF" text-anchor="middle">经验证、可组合的</text>
+<text x="233" y="559" font-size="23" font-weight="600" fill="#B9A6FF" text-anchor="middle">训练 recipe</text>
+<text x="233" y="612" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="middle">按任务选择合适的方案</text>
+<path d="M386 538 H424 V436 H454" fill="none" stroke="#B9A6FF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow-purple)"/>
+<text x="462" y="369" font-size="21" font-weight="400" fill="#B4C1D8" text-anchor="start">训练质量 · 数值稳定性 · 计算成本</text>
+<rect x="462" y="397" width="240" height="77" rx="12" fill="#18352F" stroke="none" stroke-width="1.5"/>
+<rect x="742" y="397" width="240" height="77" rx="12" fill="#18352F" stroke="none" stroke-width="1.5"/>
+<rect x="742" y="522" width="240" height="77" rx="12" fill="#18352F" stroke="none" stroke-width="1.5"/>
+<rect x="462" y="522" width="240" height="77" rx="12" fill="#18352F" stroke="none" stroke-width="1.5"/>
+<text x="582" y="430" font-size="23" font-weight="600" fill="#6BD9C5" text-anchor="middle">训练并观测</text>
+<text x="582" y="457" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="middle">学习效果与数值表现</text>
+<text x="862" y="430" font-size="23" font-weight="600" fill="#6BD9C5" text-anchor="middle">暂停并保存</text>
+<text x="862" y="457" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="middle">按用户配置触发告警</text>
+<text x="862" y="555" font-size="23" font-weight="600" fill="#6BD9C5" text-anchor="middle">调整 recipe</text>
+<text x="862" y="582" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="middle">用户查看证据后决定</text>
+<text x="582" y="555" font-size="23" font-weight="600" fill="#6BD9C5" text-anchor="middle">恢复并评估</text>
+<text x="582" y="582" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="middle">比较调整前后的效果</text>
+<path d="M710 436 H734" fill="none" stroke="#6BD9C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M862 482 V514" fill="none" stroke="#6BD9C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M734 560 H710" fill="none" stroke="#6BD9C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M582 514 V482" fill="none" stroke="#6BD9C5" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" marker-end="url(#arrow)"/>
+<path d="M1071 424 V553" fill="none" stroke="#34415B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="3 6"/>
+<circle cx="1071" cy="421" r="5" fill="#A3B2CC"/>
+<text x="1090" y="428" font-size="22" font-weight="500" fill="#EDF3FF" text-anchor="start">比较候选方案</text>
+<text x="1090" y="452" font-size="17" font-weight="400" fill="#B4C1D8" text-anchor="start">衡量干预带来的收益</text>
+<circle cx="1071" cy="482" r="5" fill="#A3B2CC"/>
+<text x="1090" y="489" font-size="22" font-weight="500" fill="#EDF3FF" text-anchor="start">验证调整效果</text>
+<text x="1090" y="513" font-size="17" font-weight="400" fill="#B4C1D8" text-anchor="start">检查质量与额外开销</text>
+<circle cx="1071" cy="543" r="5" fill="#A3B2CC"/>
+<text x="1090" y="550" font-size="22" font-weight="500" fill="#EDF3FF" text-anchor="start">调整精度</text>
+<text x="1090" y="574" font-size="17" font-weight="400" fill="#B4C1D8" text-anchor="start">依据训练反馈执行变更</text>
+<text x="1058" y="612" font-size="20" font-weight="400" fill="#B4C1D8" text-anchor="start">自动调整是长期研究目标</text>
+<path d="M56 687 H1384" fill="none" stroke="#34415B" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="56" y="732" font-size="30" font-weight="600" fill="#EDF3FF" text-anchor="start" letter-spacing="-0.45">从可复用的 recipe 和可恢复的训练，走向自适应精度</text>
+<text x="56" y="773" font-size="23" font-weight="400" fill="#B4C1D8" text-anchor="start">目标是在保持训练质量和稳定性的前提下，降低强化学习的计算成本。</text>
+</g>
+</svg>

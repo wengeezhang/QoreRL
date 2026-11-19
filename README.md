@@ -1,5 +1,7 @@
 # QoreRL
 
+**English** · [简体中文](README.zh-CN.md)
+
 <img src="docs/assets/branding/qorerl-lockup.png" alt="QoreRL — Low precision, more control." width="640">
 
 <picture>
@@ -13,9 +15,9 @@ The first milestone focuses on configurable precision recipes, numerical diagnos
 
 > **Current implementation.** Synchronous GRPO on Ray supports scoped low-precision execution (MXFP8 by default, NVFP4 selectable), fixed Hadamard, and experimental dynamic SmoothQuant. Users can discover outliers, calibrate known layers, or supply existing scales. The trainer can pause with measured evidence, then resume after the user accepts or rejects a specific change. Local tests exercise this workflow. Native GPU execution, training quality, and cost still await validation.
 
-The [first recipe guide (中文)](docs/recipes/mxfp8-hadamard.zh-CN.md) includes matched BF16 / MXFP8 / MXFP8 + Hadamard configurations, execution scope, known costs, and the GPU validation procedure. These are experimental implementations, not yet validated recommendations.
+The [first recipe guide](docs/recipes/mxfp8-hadamard.md) includes matched BF16 / MXFP8 / MXFP8 + Hadamard configurations, execution scope, known costs, and the GPU validation procedure. These are experimental implementations, not yet validated recommendations.
 
-Recipe Insights makes each recipe's costs and numerical effects visible, layer by layer. Opt-in probes compare BF16, MXFP8, and MXFP8 + Hadamard on the same sampled learner inputs and weights. View the accumulating evidence locally, inspect individual layers, and export a report or chart for sharing. [Usage and measurement scope (中文)](docs/recipe-insights.zh-CN.md).
+Recipe Insights makes each recipe's costs and numerical effects visible, layer by layer. Opt-in probes compare BF16, MXFP8, and MXFP8 + Hadamard on the same sampled learner inputs and weights. View the accumulating evidence locally, inspect individual layers, and export a report or chart for sharing. [Usage and measurement scope](docs/recipe-insights.md).
 
 <img src="docs/assets/recipe-insights-demo.png" alt="Recipe Insights interface preview with explicitly synthetic data: paired per-layer operator latency and output error, observed-layer coverage, and sample provenance. Not measured training results." width="1440">
 
@@ -34,11 +36,11 @@ This catalog tracks quantization methods, error-mitigation techniques, and RL co
 
 | Recipe / technique | Status | What it is intended to improve | Scope and source |
 | --- | --- | --- | --- |
-| **BF16 reference** | Code ready · GPU unvalidated | Provide a matched reference for learning quality, numerical behavior, and cost. | Single-rank dense Qwen3, Megatron + vLLM. [Configurations and guide](docs/recipes/mxfp8-hadamard.zh-CN.md). |
-| **Scoped MXFP8 / NVFP4** | Code ready · GPU unvalidated | Configure the base format for selected MLP down projections in both training and rollout. | MXFP8 is the default. Select NVFP4 with `recipe_options.precision` on a compatible native stack. Other operators retain the BF16 baseline. [MXFP8 guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [NVFP4 requirements](docs/ray-grpo.zh-CN.md#原生-nvfp4-需要什么). |
-| **Fixed Hadamard + MXFP8 / NVFP4** | Code ready · GPU unvalidated | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
+| **BF16 reference** | Code ready · GPU unvalidated | Provide a matched reference for learning quality, numerical behavior, and cost. | Single-rank dense Qwen3, Megatron + vLLM. [Configurations and guide](docs/recipes/mxfp8-hadamard.md). |
+| **Scoped MXFP8 / NVFP4** | Code ready · GPU unvalidated | Configure the base format for selected MLP down projections in both training and rollout. | MXFP8 is the default. Select NVFP4 with `recipe_options.precision` on a compatible native stack. Other operators retain the BF16 baseline. [MXFP8 guide](docs/recipes/mxfp8-hadamard.md) · [NVFP4 requirements](docs/ray-grpo.md#native-nvfp4-requirements). |
+| **Fixed Hadamard + MXFP8 / NVFP4** | Code ready · GPU unvalidated | Spread activation outliers across channels using a fixed randomized block rotation and a matching weight transform. | Currently MLP down projections only; not a full-model QuaRot reproduction. [Guide](docs/recipes/mxfp8-hadamard.md) · [QuaRot](https://arxiv.org/abs/2404.00456). |
 | **Learnable rotations / Hadamard-based transforms** | Planned | Optimize the rotation rather than relying on one fixed transform. | [SpinQuant](https://arxiv.org/abs/2405.16406) learns orthogonal rotations; [HARP](https://arxiv.org/abs/2605.29843) uses structured, Hadamard-initialized transforms. Both need adaptation from post-training quantization to RL; a standard Hadamard matrix itself is fixed. |
-| **Dynamic SmoothQuant** | Code ready · GPU unvalidated | Add or refresh channel scales within the user’s fixed low-precision layer set. Compare each candidate with the configuration already running on that layer. | Scoped MLP down projections. Supports periodic calibration, checkpointed review, and importing external scales. [Run the workflow (中文)](docs/recipes/dynamic-smoothquant.zh-CN.md) · [Original SmoothQuant](https://arxiv.org/abs/2211.10438). |
+| **Dynamic SmoothQuant** | Code ready · GPU unvalidated | Add or refresh channel scales within the user’s fixed low-precision layer set. Compare each candidate with the configuration already running on that layer. | Scoped MLP down projections. Supports periodic calibration, checkpointed review, and importing external scales. [Run the workflow](docs/recipes/dynamic-smoothquant.md) · [Original SmoothQuant](https://arxiv.org/abs/2211.10438). |
 | **Calibrated Clipping** | Planned | Adjust PPO clipping bounds so FP8 ratio distortion does not excessively suppress useful updates. | [UW–Madison / ByteDance Seed](https://arxiv.org/abs/2609.22870): two BF16 forward-only shadow passes, for current and old policies, every 20 steps in the paper. This calibrates clipping, not gradients or a BF16 optimizer step. |
 | **TRIAGE: mismatch-aware RL correction** | Research | Reweight trajectory segments using advantage and train–rollout log-probability gaps, with bounded correction for mismatch-amplifying updates. | [TRIAGE](https://arxiv.org/abs/2610.07043) targets native NVFP4 W4A4 learners and samplers. Requires behavior log-probabilities and loss integration; does not certify the true gradient direction. |
 | **FourSight: trajectory filtering** | Research | Filter trajectories with too many or consecutive tokens assigned very low probability by the learner. | The data-selection component of [FourSight](https://arxiv.org/abs/2611.04887), studied in FP4 RL. Evaluate retained data, sampling cost, and learning quality together. |
@@ -115,7 +117,7 @@ QoreRL aims to make this process reproducible and manageable while building evid
 
 Choose the low-precision layers first. For example, set `recipe_options.layers` to `[7, 15, 20, 25]` and `smoothquant_layers` to `[7, 15, 20]`. All four down projections run MXFP8 from the first batch. With `allow_layer_expansion: true`, layer 25 can later acquire SmoothQuant if it passes calibration. Layers outside the list keep their BF16 execution. You can also calibrate known layers directly or import scales before the first rollout.
 
-For a periodic change, the trainer records the active and candidate errors on held-out activation rows. In manual mode it saves the proposal with a recovery checkpoint and exits. Accept it to synchronize the selected scales across the learner and rollout replicas, or reject it to continue with the existing scales. Automatic approval uses the same evidence, checkpoint, and publication path. [CPU walkthrough and native configuration](docs/recipes/dynamic-smoothquant.zh-CN.md).
+For a periodic change, the trainer records the active and candidate errors on held-out activation rows. In manual mode it saves the proposal with a recovery checkpoint and exits. Accept it to synchronize the selected scales across the learner and rollout replicas, or reject it to continue with the existing scales. Automatic approval uses the same evidence, checkpoint, and publication path. [CPU walkthrough and native configuration](docs/recipes/dynamic-smoothquant.md).
 
 Matching training and rollout configuration does not guarantee matching numerics. Recipes must be checked using actual engine execution, including relevant batching and prefill/decode behavior. Trajectories must retain the weight and recipe versions that produced them.
 
@@ -171,6 +173,8 @@ Research continues alongside the first milestone. A general automatic-repair sol
 
 Development has two parallel tracks: building the practical recipe/diagnostic/recovery workflow, and continuing controlled numerical experiments. Use `uv run ruff check qorerl tests` and `uv run pytest -q` for validation.
 
-See the [design principles](design.md), [implementation TODOs](todo.md), and [developer guide (中文)](docs/ray-grpo.zh-CN.md).
+Documentation defaults to English. The project overview, design, and core guides also have Simplified Chinese editions linked at the top of each page.
+
+See the [design principles](design.md), [implementation TODOs](todo.md), and [developer guide](docs/ray-grpo.md).
 
 Design discussions and experiment proposals are welcome through [GitHub Issues](https://github.com/wengeezhang/QoreRL/issues).

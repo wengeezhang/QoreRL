@@ -1,5 +1,7 @@
 # 在训练中更新 SmoothQuant 的通道缩放
 
+[English](dynamic-smoothquant.md) · **简体中文**
+
 用户先选定哪些层的 `mlp.down_proj` 用低精度计算，再决定其中哪些层启用 SmoothQuant、何时重新校准、由谁批准新的通道缩放 S。本文以默认的 MXFP8 为例，实验性的 NVFP4 路径沿用相同的选层和校准规则。第一版覆盖单 rank dense Qwen3 的 Megatron/TE learner 和 vLLM rollout。原始 SmoothQuant 研究离线校准的 INT8 推理，QoreRL 将通道缩放用于训练期间。本地 CPU 已验证校准与发布流程，原生 GPU 的执行、开销和训练效果待验证。[原文](https://arxiv.org/abs/2211.10438)
 
 ## 选择从哪一步开始
@@ -53,7 +55,7 @@
 | `refresh` | 第 7、15、20 层 | MXFP8 + 旧 S | 新 S 比旧 S 的误差低，且达到要求的相对降幅。 |
 | `activate` | 第 25 层 | 直接 MXFP8 | 先发现 outlier。候选 S 必须比直接 MXFP8 误差低，达到要求的相对降幅，且通过首次启用误差上限（如果设置）。 |
 
-这里的 0.05 将**首次启用**后的相对 L2 误差限制在 5% 以内。默认不设上限。第 25 层获批并发布后，从下一批开始使用 MXFP8 + SmoothQuant。其余 BF16 层从观察到发布都不在此次变更范围内。[逐批行为](../../design.md#smoothquant-expansion)
+这里的 0.05 将**首次启用**后的相对 L2 误差限制在 5% 以内。默认不设上限。第 25 层获批并发布后，从下一批开始使用 MXFP8 + SmoothQuant。其余 BF16 层从观察到发布都不在此次变更范围内。[逐批行为](../../design.zh-CN.md#smoothquant-expansion)
 
 ## 在 CPU 上走完一次人工确认
 

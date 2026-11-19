@@ -1,75 +1,61 @@
-# 2026-11-08：tiny MoE Wgrad 激活恢复实验记录
+# Tiny MoE experiment · Restoring BF16 activations for Wgrad
 
-> **历史研究记录。** 这套独立的 tiny-MoE 数值实验代码已经从当前源码移除，不是 QoreRL 当前训练入口或默认修复策略。本目录保留当时的配置、原始结果和报告，供后续研究参考；不代表原生 MXFP8 已完成验证。
+**Archived November 8, 2026.** This directory preserves the configurations, results and reports from an early standalone numerical experiment. It ran on an Apple Silicon CPU using MXFP8 emulation. Native Blackwell/TE validation remains separate.
 
-原实验实现及运行说明保存在固定历史版本 [`b7df310a8f5d04b4c1b5bea388c4068ef366d01c`](https://github.com/wengeezhang/QoreRL/tree/b7df310a8f5d04b4c1b5bea388c4068ef366d01c)：[实验入口](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/experiment.py)、[量化与反向实现](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/precision.py)、[校准逻辑](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/calibration.py)、[完整运行说明](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/docs/wgrad-experiment.zh-CN.md)。
+The commands below require a checkout of [`b7df310`](https://github.com/wengeezhang/QoreRL/tree/b7df310a8f5d04b4c1b5bea388c4068ef366d01c), the revision that provided `qorerl research`. That revision contains the [entry point](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/experiment.py), [quantization and backward pass](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/precision.py), [calibration logic](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/qorerl/calibration.py) and [original run instructions (Chinese)](https://github.com/wengeezhang/QoreRL/blob/b7df310a8f5d04b4c1b5bea388c4068ef366d01c/docs/wgrad-experiment.zh-CN.md). The JSON, generated reports and test counts describe that revision.
 
-**下文的 `qorerl research` 命令仅适用于上述历史版本的独立 checkout。** 当前版本不提供该命令。原始 JSON 和报告保留当时的字段与数值；文中测试数量也仅描述当次验证。
+## Experiment setup
 
-## 已验证的范围
+One process trained a tiny MoE with a GRPO-style objective. The model had 59,296 parameters, two layers, four experts per layer and top-2 routing. In both rounds we ran three seeds (0, 1 and 2), each with three arms: BF16, fixed MXFP8 and adaptive MXFP8.
 
-在 Apple Silicon CPU 上，完成了单进程 tiny MoE 的 GRPO 风格训练以及周期校准闭环。模型 59,296 个参数，2 层、每层 4 专家、top-2。全部 MXFP8 结果来自数值仿真，**不是 Blackwell/TE 原生训练结果**。
+In the adaptive arm a layer triggered only when its MXFP8 gradient had a negative cosine similarity to its BF16 reference and both gradient norms exceeded 1e-8. Training used this same threshold throughout. Fault injection was confined to a separate unit test.
 
-两轮实验均使用 seeds 0/1/2，每个 seed 有 BF16、固定 MXFP8、adaptive 三组。没有向正式训练注入异常，没有为触发干预而调成正余弦阈值；触发条件始终是 cosine < 0 且两侧 norm > 1e-8。
-
-## 第一轮：40 步 SFT warmup，60 步 RL
+## Round 1 · 40 SFT warmup steps and 60 RL steps
 
 ```bash
 uv run qorerl research --steps 60 --warmup-steps 40 --seeds 0,1,2 \
   --out results/wgrad-cpu-20261108
 ```
 
-每个 adaptive run 在 RL step 20/40/60 校准，合计 9 次。
+Each adaptive run calibrated at RL steps 20, 40 and 60 (nine checks total). Greedy token accuracy on the fixed evaluation prompts had already reached 100% after warmup, although sampled reward still had room to improve.
 
-这轮 warmup 后，固定题集的 greedy token accuracy 已经是 100%，不适合充分观察学习曲线；采样奖励仍有提升空间。
+The trigger fired once, at step 40 of seed 0 for `blocks.1.moe.experts.2.gate_up`. The intervention used BF16 activations only for that layer's weight-gradient calculation.
 
-自然训练中只出现一次触发：seed=0，step=40，`blocks.1.moe.experts.2.gate_up`。
+| Measurement | Before intervention | After intervention |
+| --- | ---: | ---: |
+| Layer gradient cosine vs. BF16 | -0.11675442 | -0.11680047 |
+| Layer gradient norm | 1.02580129e-5 | 1.02569306e-5 |
+| Whole-model gradient cosine vs. BF16 | 0.99565213 | 0.99565213 |
+| MXFP8 policy loss after one shadow AdamW step | -0.004993015 | -0.004993015 |
+| BF16 policy loss after one shadow AdamW step | -0.006765507 | -0.006765507 |
 
-| 指标 | 干预前 | 只恢复 Wgrad BF16 激活后 |
-|---|---:|---:|
-| 与 BF16 参考的逐层梯度 cosine | -0.11675442 | -0.11680047 |
-| 该层梯度 norm | 1.02580129e-5 | 1.02569306e-5 |
-| 全模型梯度 cosine | 0.99565213 | 0.99565213 |
-| 私有 AdamW 一步更新后的 MXFP8 policy loss | -0.004993015 | -0.004993015 |
-| 私有 AdamW 一步更新后的 BF16 policy loss | -0.006765507 | -0.006765507 |
+The layer's BF16 reference gradient norm was 1.37021896e-6. The local gradients pointed in opposite directions, but both were small and the whole-model directions remained close. The intervention left the local cosine negative. The two trial updates produced the same losses at the precision shown. [Full trigger event](saturated-trigger-events.json) · [Report](saturated-report.md) · [Configuration](saturated-config.json) · [Raw summary](saturated-summary.json)
 
-该层 BF16 参考梯度 norm 为 1.37021896e-6。这里不能把负余弦直接解释为整个训练发生严重错误：该层梯度很小，全模型方向仍高度接近。干预没有把局部方向转正，也没有在打印精度下改变试更新后的 loss。
+## Round 2 · 5 SFT warmup steps and 100 RL steps
 
-保存的 [完整触发事件](saturated-trigger-events.json) 包含全部逐层统计与试更新结果；[汇总](saturated-report.md)、[配置](saturated-config.json)、[原始汇总 JSON](saturated-summary.json) 同时保留。
-
-## 第二轮：5 步 SFT warmup，100 步 RL
-
-为观察实际学习，从较少 warmup 的同一类 checkpoint 起跑，没有更换模型或修改阈值：
+We shortened warmup to leave room for learning on the evaluation task. We kept the model and trigger thresholds from round 1.
 
 ```bash
 uv run qorerl research --steps 100 --warmup-steps 5 --seeds 0,1,2 \
   --out results/wgrad-learning-20261108
 ```
 
-每个 adaptive run 在 step 20/40/60/80/100 校准，合计 15 次。
+Each adaptive run calibrated at steps 20, 40, 60, 80 and 100 (15 checks total).
 
-| Seed | BF16 初始 → 最终 greedy token accuracy | MXFP8 初始 → 最终 | Adaptive 最终 | 自然触发 |
-|---|---|---|---:|---:|
+| Seed | BF16 greedy token accuracy, initial → final | Fixed MXFP8, initial → final | Adaptive, final | Triggers |
+| --- | --- | --- | ---: | ---: |
 | 0 | 0.2383 → 0.9102 | 0.2266 → 0.8789 | 0.8789 | 0 |
 | 1 | 0.1289 → 0.6602 | 0.1328 → 0.6484 | 0.6484 | 0 |
 | 2 | 0.1367 → 0.9648 | 0.1641 → 0.9570 | 0.9570 | 0 |
 
-各组使用相同的起点权重；初始分数略有差异来自前向精度不同。评测题固定但不是独立 held-out 泛化任务。
+All three arms for each seed started from the same weights. Forward precision accounts for the small differences in initial scores. The fixed evaluation prompts measure progress on this task. They do not measure generalization to an independent held-out set.
 
-三个 seed 在全部校准点上的最小有效逐层 cosine 分别为 0.66350、0.93921、0.92670，因此没有命中“方向相反”条件。没有为了演示自动恢复而强制回退。
+The minimum valid layer cosine across calibration steps was 0.66350, 0.93921 and 0.92670 for seeds 0, 1 and 2, respectively. No layer met the trigger. We compared every parameter in the final fixed and adaptive MXFP8 checkpoints and found exact equality for all three seeds. This checks that the additional BF16 probes and shadow updates left the live training parameters untouched when no intervention fired. The per-step logs and checkpoints were stored locally under `results/wgrad-learning-20261108/`. [Report](learning-report.md) · [Configuration](learning-config.json) · [Raw summary](learning-summary.json)
 
-另外逐张量核对了这轮固定 MXFP8 与 adaptive 的最终 checkpoint：三个 seed 的所有参数完全相同。这验证了**没有触发时，额外 BF16 校准与私有试更新不会偷偷改变实际训练**。
+## Implementation checks
 
-见 [完整汇总](learning-report.md)、[配置](learning-config.json)、[原始汇总 JSON](learning-summary.json)。完整逐步日志与 checkpoint 位于本机 `results/wgrad-learning-20261108/`。
+At the time of the experiment, `uv run pytest -q` passed 11 tests. Coverage included E4M3 rounding and subnormals, row and column quantization, tail blocks shorter than 32, and isolation of Wgrad-only changes from forward and Dgrad computation. Tests also checked model, Adam and RNG state during calibration, missing or near-zero gradients, and triggers at steps 20 and 40. A separate fault-injection test exercised the trigger branch.
 
-## 实现检查
+## Interpretation
 
-`uv run pytest -q`：11 项通过。覆盖 E4M3 舍入和 subnormal、行/列量化区别、非 32 整除的尾块、Wgrad-only 对 Fprop/Dgrad 的隔离、校准期间模型/Adam/RNG 不变、缺失和近零梯度处理，以及实际第 20/40 步的触发周期。
-
-触发控制逻辑另有明确标注的故障注入单测。该单测只证明程序分支可运行，不作为训练效果证据。
-
-## 当时的实验结论
-
-已经验证训练、周期对照、自动触发和 Wgrad-only 干预的实现闭环。尚未证明这种修复能提高学习质量：第一轮那次自然触发未改善局部梯度方向；第二轮没有触发，无法评价修复收益。
-
-这些结果也不能据此否定方法在更大模型或原生 kernel 中的价值。下一阶段应先让原生 MXFP8 路径与此处的操作数、保存张量语义对齐，再做更有区分度的学习任务。
+The experiment exercised periodic comparisons, an automatic trigger and a Wgrad-only intervention. The one natural intervention failed to improve the local gradient direction. In the run with measurable learning, no intervention fired, so its effect on learning quality remains open. Testing on larger models requires matching the native kernel's operands and saved tensors to the emulation, then evaluating on a task that can distinguish the alternatives.

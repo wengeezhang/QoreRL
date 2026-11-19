@@ -1,5 +1,7 @@
 # 第一个实验 recipe：MXFP8 MLP down projection + 固定 Hadamard
 
+[English](mxfp8-hadamard.md) · **简体中文**
+
 本 recipe 要回答一个具体问题：**在相同的 MLP `down_proj` 量化范围下，加入固定 Hadamard，是否比直接 MXFP8 更适合 RL 训练？**
 
 当前已经实现原生执行适配、配置、状态保存和本地测试；**尚未在 NVIDIA GPU 上运行验证，也没有训练收益或加速结论**。先用 BF16 对照验证整个训练链路，再验证原生 MXFP8，最后比较 Hadamard 的收益与成本。
