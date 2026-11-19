@@ -4,14 +4,32 @@ QoreRL 把量化和量化误差缓解方法做成可复现的 **recipe**。一�
 
 ## 1. 用户能控制什么
 
-同样是把 MLP 的输出投影（`down_proj`）放到 MXFP8 上运行，用户可以选择两种不同的做法。
+每次运行先选一份 recipe。以动态 SmoothQuant 为例，**已启用层**实际执行 MXFP8 + SmoothQuant，**观察范围**决定校准时从哪里采集激活。观察 BF16 层只需要读取它的输入。它可以一直使用 BF16，直到用户授权的候选完成发布。
 
-| Recipe | 启动时选择什么 | 训练中会发生什么 |
+| 用户想做什么 | 设置或入口 | 实际行为 |
 | --- | --- | --- |
-| 固定 Hadamard | 指定层、旋转分块大小和随机种子 | 两端使用相同的固定旋转，对输入和权重做配套变换，再量化。权重持续更新，旋转保持固定。 |
-| 动态 SmoothQuant | 指定层，选择已有的通道缩放 S，或选择校准间隔及确认方式 | 只做发现时输出报告。启用拟合时，到期后比较当前 S 与候选 S，由用户决定是否更换，也可预先授权系统按验证结果选择。 |
+| 跑 BF16 基线 | 省略 recipe 配置 | 默认使用 BF16，周期校准关闭。 |
+| 固定使用一套方案 | 固定 Hadamard 选择层、分块和种子。已有 SmoothQuant 的 S 时，设置 `scale_artifact` 和 `refresh_every_optimizer_steps: 0` | Hadamard 旋转固定。外部 S 在首次采样前导入，训练期间沿用。 |
+| 只观察 outlier | 原生 BF16、直接 MXFP8、固定 Hadamard 或 SmoothQuant 开启 `discovery_only` | 到期写发现报告并继续训练。BF16 可观察所有 `down_proj`。固定范围的 MXFP8 recipe 观察已选层。 |
+| 只更新指定层的 S | 选动态 SmoothQuant 和 `layers`。已知要校准哪些层时可设 `discover_outliers: false` | 定期在这些层拟合并验证 S。有候选才进入人工确认或按授权自动应用。已有外部 S 也可导入后继续刷新。 |
+| 指定初始层，允许同一 recipe 扩层 | **扩层设计**：初始 `layers: [7, 19]`，显式授权观察并新增其他 `down_proj` | 初始只有两层走 MXFP8。其余层用 BF16，周期观测覆盖全部 `down_proj`。新层可以提议首次启用 SmoothQuant，已启用层可以提议刷新 S。详见下例。 |
+| 让已选 recipe 无人值守运行 | 显式选择 SmoothQuant，设置 `approval: "auto"`，并指定是否授权扩层 | 候选按该 recipe 的规则批准。省略 `layers` 会从第一批起在全部 `down_proj` 使用该 recipe。跨 recipe 自动选择仍属长期目标。 |
 
-两种方法共用选层、权重发布、版本确认和恢复机制。运行中的发现和审批是按需启用的。已知哪些层有 outlier 时，用户可以直接为它们准备候选。有兼容的 S 时，可以在首次采样前直接应用。[固定 Hadamard 指南](docs/recipes/mxfp8-hadamard.zh-CN.md) · [动态 SmoothQuant 指南](docs/recipes/dynamic-smoothquant.zh-CN.md)
+校准周期按实际完成的优化器更新计数，默认每跨过 20 次更新，在随后的同步批边界检查一次。默认人工确认。发现、拟合和批准是独立的步骤，用户已有的证据或 S 决定从哪一步进入。[配置与默认值](qorerl/training/config.py) · [选层](qorerl/recipes/spec.py) · [校准条件](qorerl/recipes/calibration.py) · [运行示例](docs/recipes/dynamic-smoothquant.zh-CN.md)
+
+### 扩层特例：第 23 层什么时候离开 BF16？
+
+下表是本轮扩层的设计与验收目标。假设用户初始启用第 7、19 层，授权观察所有 `down_proj`，本轮只接受第 23 层的新增候选。
+
+| 时刻 | 第 7、19 层 | 第 23 层 |
+| --- | --- | --- |
+| 第一次采样 | learner 与 rollout 使用 MXFP8 + SmoothQuant | 两端使用 BF16 |
+| 到达校准周期 | 采集激活，评估是否刷新现有 S | 采集 BF16 输入。发现 outlier 后，拟合 S，在留出输入上试算量化输出。实际训练与采样仍用 BF16。 |
+| 展示候选 | 刷新候选比较旧 S 与新 S | 首次启用候选给出直接 MXFP8 和 MXFP8 + 候选 S 各自相对 BF16 的误差，让用户知道启用后的数值代价。 |
+| 人工或自动决定 | 继续使用已生效的 S | 拒绝则继续 BF16。候选先随变更前的检查点保存。批准后由 learner 应用并发布新策略。全部 rollout 确认后，下一批才使用 MXFP8 + SmoothQuant。 |
+| 后续校准 | 可继续刷新 S | 已进入生效范围，按同一套刷新规则比较旧 S 与新 S。 |
+
+首次启用时，当前 BF16 输出相对自身的误差为零。若套用刷新 S 的“必须比当前误差低”，任何新层都进不来。首次启用要回答的是“把这个 BF16 层也量化，需要接受多少误差”。两项局部误差可以辅助决策，端到端的成本、奖励和训练稳定性仍需实测。
 
 ## 2. 一批训练由谁负责
 
