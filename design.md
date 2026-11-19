@@ -2,11 +2,15 @@
 
 **English** · [简体中文](design.zh-CN.md)
 
-## 1. Why QoreRL uses recipes
+## 1. What problem does QoreRL solve?
 
-QoreRL packages quantization methods and techniques for reducing quantization error as reproducible **recipes**. In reinforcement learning, the rollout engine uses the policy to generate responses, and the learner uses those responses to update the model. When a layer starts using a different numerical method mid-run, users need to know what evidence justified the change, which batch first used it on both engines, and how to recover the state that preceded it.
+QoreRL packages quantization methods and techniques for reducing quantization error as reproducible **recipes**. Using a method from a paper in RL means applying it both when the rollout engine generates responses and when the learner uses those responses to update the policy. If a layer changes how it computes during training, users need to know what evidence justified the change, which batch first used it on both engines, and how to recover the state that preceded it.
 
-**The recipe defines the numerical method.** It specifies which operators it supports, what they compute and, when its parameters can change, how to propose and evaluate an update. **The framework manages changes during training.** It collects evidence within the scope the user authorized, handles approval, saves the training state, and records which policy version produced each batch. This gives different recipes a common way to express where they run, what can change, and what evidence warrants a change.
+### Recipes are the first-class abstraction
+
+A recipe is what a user selects to run a method and what a developer adds to support a new one. For each run, the user chooses where the recipe applies and which changes it may make during training. The recipe defines the supported operators and their computation. If it supports adjustments, it also defines what can change and how to evaluate a candidate.
+
+The framework gives recipes a shared training loop. It collects observations within the user's chosen scope, handles approval and checkpointing, and publishes an accepted change to the learner and rollout before the next batch. A developer adding a method can reuse that workflow and focus on what the method does and what evidence justifies applying it.
 
 ## 2. How to run a recipe
 
