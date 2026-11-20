@@ -1,7 +1,6 @@
 """Recipe identity, canonical state and recovery are enforced before execution."""
 
 import io
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,12 +8,11 @@ import pytest
 import torch
 
 from qorerl.engines.base import validate_install
+from qorerl.engines.factory import make_learner_engine
 from qorerl.engines.single_rank_learner import SingleRankGRPOLearner
-from qorerl.recipes.calibration import make_scale_artifact
+from qorerl.recipes.smoothquant import apply_smoothquant_candidate
 from qorerl.recipes.spec import MXFP8_HADAMARD, MXFP8_MLP, MXFP8_SMOOTHQUANT, resolve_recipe
 from qorerl.recipes.state import RecipeState, down_proj_name
-from qorerl.runtime.calibration import artifact_context, load_initial_scales, load_scales
-from qorerl.runtime.ray_runtime import run_sync_grpo
 from qorerl.training.config import TrainConfig
 from qorerl.training.contracts import PolicyVersion, WeightSnapshot
 
@@ -90,47 +88,54 @@ def test_first_activation_with_identity_scale_is_a_new_recoverable_policy():
     assert set(state.report()["targets"]) == {initial, extra}
     assert state.report()["smoothquant_targets"] == [initial]
     assert set(state.report()["eligible_targets"]) == {initial, extra}
-    state.install_scales({**state.scales, extra: torch.ones(64)})
+    candidate = {extra: torch.ones(64)}
+    apply_smoothquant_candidate(state, candidate)
     promoted = state.active_identity
+    torch.testing.assert_close(state.smoothing_factors[initial], before["scales"][initial], rtol=0, atol=0)
+    apply_smoothquant_candidate(state, candidate)
+    assert state.active_identity == promoted
     assert state.is_active(extra) and promoted != state.validate(before)
-    for invalid in ({extra: torch.ones(64)}, {**state.scales, "unknown": torch.ones(64)}):
-        with pytest.raises(ValueError, match="scales"):
-            state.install_scales(invalid)
+    for invalid in ({extra: torch.ones(64)}, {**state.smoothing_factors, "unknown": torch.ones(64)}):
+        with pytest.raises(ValueError, match="eligible"):
+            state.install_smoothing_factors(invalid)
         assert state.active_identity == promoted
     state.load(before)
     assert not state.is_active(extra)
     assert state.is_active(initial)
 
 
-def test_startup_artifact_cannot_activate_layers_outside_initial_selection(tmp_path):
-    artifact = tmp_path / "scales.json"
+def test_startup_artifact_cannot_activate_layers_outside_initial_selection(smoothing_artifact):
     cfg = TrainConfig(
         learner_backend="torch_test",
         rollout_backend="torch_test",
         recipe_id=MXFP8_SMOOTHQUANT,
         recipe_options={"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True},
-        recipe_calibration={"scale_artifact": str(artifact)},
     )
-    artifact.write_text(
-        json.dumps(make_scale_artifact({down_proj_name(0): torch.ones(32)}, **artifact_context(cfg)))
-    )
+    learner = make_learner_engine(cfg)
+    artifact = smoothing_artifact(cfg, {down_proj_name(0): torch.ones(32)})
     with pytest.raises(ValueError, match="outside the initial"):
-        run_sync_grpo(cfg, tmp_path / "output")
+        learner.apply_candidate(artifact, initial=True)
 
 
-def test_offline_fit_for_same_initial_layers_can_seed_expansion_but_not_a_live_review():
-    fixed = TrainConfig(recipe_id=MXFP8_SMOOTHQUANT, recipe_options={"layers": [1]})
+def test_offline_fit_for_same_initial_layers_can_seed_expansion_but_not_a_live_review(smoothing_artifact):
+    fixed = TrainConfig(
+        learner_backend="torch_test",
+        rollout_backend="torch_test",
+        recipe_id=MXFP8_SMOOTHQUANT,
+        recipe_options={"layers": [1]},
+    )
     cfg = replace(fixed, recipe_options={"layers": [1], "allow_layer_expansion": True})
+    learner = make_learner_engine(cfg)
     name = down_proj_name(1)
-    scales = {name: torch.ones(32)}
-    artifact = make_scale_artifact(scales, **artifact_context(fixed))
-    torch.testing.assert_close(load_initial_scales(cfg, artifact)[name], scales[name])
+    factor = torch.full((32,), 2.0)
+    artifact = smoothing_artifact(fixed, {name: factor})
     with pytest.raises(ValueError, match="recipe_id"):
-        load_scales(cfg, artifact)
+        learner.apply_candidate(artifact)
+    learner.apply_candidate(artifact, initial=True)
+    torch.testing.assert_close(learner.recipe_state.smoothing_factors[name], factor)
+    other = make_learner_engine(replace(cfg, recipe_options={"layers": [2], "allow_layer_expansion": True}))
     with pytest.raises(ValueError, match="recipe_id"):
-        load_initial_scales(
-            replace(cfg, recipe_options={"layers": [2], "allow_layer_expansion": True}), artifact
-        )
+        other.apply_candidate(artifact, initial=True)
 
 
 def make_state(spec):
@@ -210,40 +215,40 @@ def test_smoothquant_validates_all_scale_vectors_before_install(bad_scale):
     first = next(iter(state.targets))
     second = state.add_target(1, torch.zeros(32, 64))
     previous = state.active_identity
-    scales = state.scales
-    scales[first].fill_(2)
+    factors = state.smoothing_factors
+    factors[first].fill_(2)
     if bad_scale == "missing":
-        scales.pop(second)
+        factors.pop(second)
     elif bad_scale == "width":
-        scales[second] = torch.ones(32)
+        factors[second] = torch.ones(32)
     elif bad_scale == "dtype":
-        scales[second] = scales[second].bfloat16()
+        factors[second] = factors[second].bfloat16()
     elif bad_scale == "grad":
-        scales[second].requires_grad_()
+        factors[second].requires_grad_()
     else:
-        scales[second][0] = {"negative": -1, "zero": 0, "nan": float("nan"), "inf": float("inf")}[bad_scale]
-    with pytest.raises(ValueError, match="scale"):
-        state.install_scales(scales)
+        factors[second][0] = {"negative": -1, "zero": 0, "nan": float("nan"), "inf": float("inf")}[bad_scale]
+    with pytest.raises(ValueError, match="factor|initial target"):
+        state.install_smoothing_factors(factors)
     assert state.active_identity == previous
-    assert state.scales[first].eq(1).all()
+    assert state.smoothing_factors[first].eq(1).all()
 
 
 def test_smoothquant_scale_ownership_and_checkpoint_round_trip():
     spec = resolve_recipe(MXFP8_SMOOTHQUANT)
     state, other = make_state(spec), make_state(spec)
     name = next(iter(state.targets))
-    scale = torch.linspace(0.25, 4, 128)
-    state.install_scales({name: scale})
+    factor = torch.linspace(0.25, 4, 128)
+    state.install_smoothing_factors({name: factor})
     identity = state.active_identity
     assert identity != other.active_identity
-    scale.zero_()
-    state.scales[name].neg_()
+    factor.zero_()
+    state.smoothing_factors[name].neg_()
     payload = state.to_dict()
     assert other.validate(payload) == identity
     assert identity != other.active_identity
     other.load(payload)
     assert other.active_identity == identity == f"{spec.identity}:{payload['scale_digest']}"
-    torch.testing.assert_close(state.scales[name], other.scales[name], rtol=0, atol=0)
+    torch.testing.assert_close(state.smoothing_factors[name], other.smoothing_factors[name], rtol=0, atol=0)
     payload["scales"][name][0] *= 2
     with pytest.raises(ValueError, match="digest"):
         other.load(payload)
@@ -274,15 +279,15 @@ def test_smoothing_is_bounded_by_the_fixed_low_precision_scope(precision, expand
         state.add_target(23, w)
     direct = down_proj_name(25)
     assert state.transform_weight(w, direct) is w
-    proposed = {**state.scales, direct: torch.full((64,), 2.0)}
+    proposed = {**state.smoothing_factors, direct: torch.full((64,), 2.0)}
     with pytest.raises(ValueError, match="eligible"):
-        state.install_scales({**proposed, down_proj_name(23): torch.ones(64)})
+        state.install_smoothing_factors({**proposed, down_proj_name(23): torch.ones(64)})
     if expand:
-        state.install_scales(proposed)
+        state.install_smoothing_factors(proposed)
         torch.testing.assert_close(state.transform_weight(w, direct), w * 2)
     else:
         with pytest.raises(ValueError, match="eligible"):
-            state.install_scales(proposed)
+            state.install_smoothing_factors(proposed)
     assert set(state.report()["targets"]) == {down_proj_name(i) for i in base}
 
 

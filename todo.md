@@ -18,7 +18,7 @@ The [execution guide](docs/ray-grpo.md) gives the entry points and acceptance cr
 The [MXFP8 and Hadamard guide](docs/recipes/mxfp8-hadamard.md) describes the implementation. Measuring its GPU benefit requires the reproducible BF16 baseline from P0.
 
 - [x] Implement native MXFP8 training, export and rollout for selected MLP down projections, with a fixed Hadamard comparison. Specify the precision of the forward pass, input gradient (Dgrad) and weight gradient (Wgrad). Keep other layers in BF16.
-- [x] Define recipe specifications, include options in their identifiers, save fixed signs and targets, and check compatibility on resume. Dynamic SmoothQuant also versions its scales by content.
+- [x] Define recipe specifications, include options in their identifiers, save fixed signs and targets, and check compatibility on resume. Dynamic SmoothQuant also versions its smoothing factors by content.
 - [x] Validate model, shape, hardware and backend support at startup. Report unsupported combinations explicitly.
 - [ ] Validate NVFP4 forward, Dgrad, Wgrad, candidate calibration and publication on native GPUs with matched weights and inputs. Record numerical results on both sides of refit, recovery behavior, gains and overhead.
 - [ ] Run operator probes and all three GRPO configurations on GPU. Verify nonzero updates, refit and resume, and compare the native quantizers.
@@ -42,7 +42,7 @@ Acceptance requires reproducible BF16 and MXFP8 comparisons on the same workload
 
 [Dynamic SmoothQuant](docs/recipes/dynamic-smoothquant.md) exercises this workflow.
 
-- [x] Support known targets or automatic discovery, periodic candidate preparation, comparisons on held-out rows, manual or rule-based approval, checkpointing and coordinated publication. Allow direct import of existing scales.
+- [x] Support known targets or automatic discovery, periodic candidate preparation, comparisons on held-out rows, manual or rule-based approval, checkpointing and coordinated publication. Allow direct import of fitted smoothing factors.
 - [ ] Check checkpoint recovery and both engines' actual outputs on native hardware. Report local error, train–rollout log-probability differences, task quality, memory and time separately.
 - [ ] Use independent prompts across batches to evaluate refresh intervals, candidate filters and joint application to several layers before expanding automatic approval.
 - [ ] Distinguish invalid numerical states, statistical anomalies and loss of training quality. Record evidence, possible causes and supported adjustments. Treat outliers and negative gradient cosines as observations that need investigation.

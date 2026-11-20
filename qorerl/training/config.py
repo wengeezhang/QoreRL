@@ -58,6 +58,12 @@ class TrainConfig:
     def calibration(self):
         return CalibrationConfig.from_dict(self.recipe_calibration)
 
+    @property
+    def active_calibration(self):
+        if self.recipe_calibration or self.recipe.candidate_handler is not None:
+            return self.calibration
+        return None
+
     def __post_init__(self):
         pair = (self.learner_backend, self.rollout_backend)
         if pair not in {("megatron", "vllm"), ("torch_test", "torch_test")}:
@@ -65,12 +71,13 @@ class TrainConfig:
         recipe = self.recipe
         if not isinstance(self.recipe_calibration, dict):
             raise ValueError("recipe_calibration must be an object")
-        if self.recipe_calibration or recipe.uses_smoothquant:
-            calibration = self.calibration
-            if not recipe.uses_smoothquant and not (calibration.discovery_only and not self.is_cpu_test):
-                raise ValueError(
-                    "Scale calibration requires the SmoothQuant recipe; native recipes support discovery_only"
-                )
+        calibration = self.active_calibration
+        if (
+            calibration
+            and recipe.candidate_handler is None
+            and not (calibration.discovery_only and not self.is_cpu_test)
+        ):
+            raise ValueError("This recipe cannot prepare candidates; native recipes support discovery_only")
         if self.is_cpu_test and not (
             recipe.name == "fp32-test-v1" or (recipe.is_mxfp8 and recipe.uses_smoothquant)
         ):
@@ -116,10 +123,16 @@ class TrainConfig:
         path = Path(path)
         data = json.loads(path.read_text())
         calibration = data.get("recipe_calibration")
-        if isinstance(calibration, dict) and isinstance(calibration.get("scale_artifact"), str):
-            if calibration["scale_artifact"]:
-                calibration["scale_artifact"] = str((path.parent / calibration["scale_artifact"]).resolve())
+        if isinstance(calibration, dict):
+            for key in ("initial_artifact", "scale_artifact"):
+                value = calibration.get(key)
+                if isinstance(value, str) and value.strip():
+                    calibration[key] = str((path.parent / value).resolve())
         return cls(**data)
 
     def to_dict(self):
-        return asdict(self)
+        result = asdict(self)
+        options = result["recipe_calibration"]
+        if "scale_artifact" in options:
+            options["initial_artifact"] = options.pop("scale_artifact")
+        return result

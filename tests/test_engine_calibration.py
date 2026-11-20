@@ -1,4 +1,4 @@
-"""Exercise dynamic scale publication and recovery using the explicit CPU fixture."""
+"""Exercise candidate publication and recovery using the explicit CPU fixture."""
 
 import io
 from dataclasses import replace
@@ -55,7 +55,9 @@ def assert_same_checkpoint(a, b):
 
 
 @pytest.mark.parametrize("expand", [False, True], ids=["refresh", "first-activation"])
-def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_training(expand):
+def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_training(
+    expand, smoothing_artifact
+):
     options = {"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True} if expand else {}
     cfg = replace(fixture_config(), recipe_options=options)
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
@@ -82,9 +84,10 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
                 rtol=0,
                 atol=0,
             )
-        with pytest.raises(ValueError, match="eligible"):
-            learner.apply_calibration({down_proj_name(2): torch.ones(32)})
-    proposals, evidence = learner.prepare_calibration(batch)
+        with pytest.raises(ValueError, match="outside installed|eligible"):
+            learner.apply_candidate(smoothing_artifact(cfg, {down_proj_name(2): torch.ones(32)}))
+    candidate, evidence = learner.prepare_candidate(batch)
+    proposals = candidate["scales"]
     assert name in proposals and down_proj_name(2) not in proposals
     assert {event["target"] for event in evidence} == set(learner.recipe_state.targets)
     for event in evidence:
@@ -99,12 +102,14 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
 
     ids = torch.tensor([[1, 4, 3]])
     logits_before = rollout.model(ids)
-    approved = learner.apply_calibration(proposals)
+    approved = learner.apply_candidate(candidate)
     assert approved.weight_version == version_before.weight_version
     assert approved.recipe_id != version_before.recipe_id
     after = checkpoint_state(learner)
     assert_same_training_state(after, before)
-    expected = {**before["recipe_state"]["scales"], **proposals}
+    expected = before["recipe_state"]["scales"] | {
+        name: torch.tensor(vector) for name, vector in proposals.items()
+    }
     torch.testing.assert_close(after["recipe_state"]["scales"], expected, rtol=0, atol=0)
     assert rollout.install_weights(learner.export_weights()) == approved
     if expand:
@@ -147,7 +152,7 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
 
 
 @pytest.mark.parametrize("discovery_only", [False, True], ids=["proposals", "discovery"])
-def test_fixed_overlay_observes_and_modifies_only_its_initial_subset(discovery_only):
+def test_fixed_overlay_observes_and_modifies_only_its_initial_subset(discovery_only, smoothing_artifact):
     cfg = replace(
         fixture_config(),
         recipe_options={"layers": [0, 1], "smoothquant_layers": [1]},
@@ -155,11 +160,11 @@ def test_fixed_overlay_observes_and_modifies_only_its_initial_subset(discovery_o
     )
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
     original = rollout.install_weights(learner.export_weights())
-    _, evidence = learner.prepare_calibration(sample(cfg, rollout, 1))
+    _, evidence = learner.prepare_candidate(sample(cfg, rollout, 1))
     assert [event["target"] for event in evidence] == [down_proj_name(1)]
     for index in (0, 2):
         with pytest.raises(ValueError):
-            learner.apply_calibration({down_proj_name(index): torch.ones(32)})
+            learner.apply_candidate(smoothing_artifact(cfg, {down_proj_name(index): torch.ones(32)}))
     assert learner.policy_version == original
 
 
@@ -174,16 +179,16 @@ def test_empty_initial_overlay_is_direct_until_a_candidate_is_approved(expand):
     batch = sample(cfg, rollout, 1)
     if not expand:
         learner.logits = lambda *_: pytest.fail("Empty observation scope triggered a forward pass")
-    proposals, evidence = learner.prepare_calibration(batch)
-    assert not learner.recipe_state.scales
+    candidate, evidence = learner.prepare_candidate(batch)
+    assert not learner.recipe_state.smoothing_factors
     if expand:
         assert all(event["action"] == "activate" for event in evidence)
-        assert down_proj_name(0) in proposals
-        learner.apply_calibration(proposals)
+        assert down_proj_name(0) in candidate["scales"]
+        learner.apply_candidate(candidate)
         rollout.install_weights(learner.export_weights())
-        assert set(rollout.model.installation.state.scales) == set(proposals)
+        assert set(rollout.model.installation.state.smoothing_factors) == set(candidate["scales"])
     else:
-        assert (proposals, evidence) == ({}, [])
+        assert candidate is None and evidence == []
 
 
 def test_prefix_capture_excludes_duplicate_contexts_and_obeys_bound():
@@ -197,21 +202,22 @@ def test_prefix_capture_excludes_duplicate_contexts_and_obeys_bound():
     assert prefixes == [((1, 3, 7), 0), ((1, 3, 7, 8), 3), ((1, 4), 1)]
 
 
-def test_scoped_scale_updates_and_tampering_fail_before_policy_changes():
+def test_scoped_scale_updates_and_tampering_fail_before_policy_changes(smoothing_artifact):
     cfg = replace(fixture_config(), recipe_options={"layers": [0, 1]})
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
     old = rollout.install_weights(learner.export_weights())
-    valid = {down_proj_name(0): torch.full((32,), 2.0)}
-    for invalid in (
-        {down_proj_name(1): torch.zeros(32)},
-        {down_proj_name(1): torch.ones(64)},
-        {down_proj_name(2): torch.ones(32)},
-        {down_proj_name(1): torch.ones(32, dtype=torch.bool)},
+    valid = smoothing_artifact(cfg, {down_proj_name(0): torch.full((32,), 2.0)})
+    for name, vector in (
+        (down_proj_name(1), [0] * 32),
+        (down_proj_name(1), [1] * 64),
+        (down_proj_name(2), [1] * 32),
+        (down_proj_name(1), [True] * 32),
     ):
+        damaged = valid | {"scales": {**valid["scales"], name: vector}}
         with pytest.raises(ValueError):
-            learner.apply_calibration({**valid, **invalid})
+            learner.apply_candidate(damaged)
         assert learner.policy_version == old and learner.recipe_state.active_identity == old.recipe_id
-    learner.apply_calibration(valid)
+    learner.apply_candidate(valid)
     snapshot = learner.export_weights()
     snapshot.recipe_state["scales"][down_proj_name(0)].add_(1)
     with pytest.raises(ValueError, match="digest"):

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 BASELINES = {"bf16-baseline-v1", "fp32-test-v1"}
@@ -43,6 +44,20 @@ class RecipeSpec:
     @property
     def uses_smoothquant(self):
         return self.name.endswith("-" + SMOOTHQUANT)
+
+    @property
+    def candidate_handler(self):
+        """A recipe may implement preparation and application of runtime updates."""
+        if self.uses_smoothquant:
+            from qorerl.recipes import smoothquant
+
+            return smoothquant
+        return None
+
+    def accepts_policy_identity(self, identity):
+        if self.uses_smoothquant:
+            return re.fullmatch(re.escape(self.identity) + r":[0-9a-f]{64}", identity) is not None
+        return identity == self.identity
 
     def to_dict(self):
         transform = "block-rht-dh-v1" if self.uses_hadamard else None

@@ -13,7 +13,7 @@ QoreRL 是一个以量化为核心的大模型强化学习框架，目前处于�
 
 首期聚焦可配置的精度 recipe、数值诊断和训练恢复。用户可以观测训练，在出现异常时保存可恢复的状态，根据证据选择如何调整，然后继续训练。根据训练反馈自动调整精度是长期研究目标。
 
-> **当前实现。** 基于 Ray 的同步 GRPO 支持在选定层执行低精度计算（默认 MXFP8，也可选 NVFP4）、固定 Hadamard 旋转和实验性的动态 SmoothQuant。用户可以先发现 outlier、直接校准已知层，或导入已有的缩放因子。训练可以携带观测证据暂停，等用户接受或拒绝具体变更后恢复。这些流程已通过本地测试。原生 GPU 执行、训练质量和成本仍待验证。
+> **当前实现。** 基于 Ray 的同步 GRPO 支持在选定层执行低精度计算（默认 MXFP8，也可选 NVFP4）、固定 Hadamard 旋转和实验性的动态 SmoothQuant。用户可以先发现 outlier、直接校准已知层，或导入已有的平滑因子。训练可以携带观测证据暂停，等用户接受或拒绝具体变更后恢复。这些流程已通过本地测试。原生 GPU 执行、训练质量和成本仍待验证。
 
 第一份 recipe 指南给出了可直接对照的 BF16、MXFP8、MXFP8 + Hadamard 三组配置，以及适用算子、已知开销和 GPU 验证步骤。这些实现目前处于实验阶段。[固定 Hadamard 使用指南](docs/recipes/mxfp8-hadamard.zh-CN.md)
 
@@ -40,7 +40,7 @@ Recipe Insights 逐层展示每种方案的开销和数值效果。启用探针�
 | **指定层使用 MXFP8 / NVFP4** | 已实现，待 GPU 验证 | 在训练与采样两端为选定的 MLP 下投影指定基础精度 | 默认 MXFP8。在兼容的环境中可通过 `recipe_options.precision` 选用 NVFP4，其余算子沿用 BF16。[MXFP8 指南](docs/recipes/mxfp8-hadamard.zh-CN.md) · [NVFP4 环境要求](docs/ray-grpo.zh-CN.md#原生-nvfp4-需要什么) |
 | **固定 Hadamard + MXFP8 / NVFP4** | 已实现，待 GPU 验证 | 用固定的随机分块旋转把激活离群值分散到多个通道，对权重施加配套变换 | 当前实现覆盖 MLP 下投影，QuaRot 原文还包含其他位置的变换。[使用指南](docs/recipes/mxfp8-hadamard.zh-CN.md) · [QuaRot](https://arxiv.org/abs/2404.00456) |
 | **可学习旋转与基于 Hadamard 的变换** | 计划中 | 通过学习选择更合适的旋转 | 标准 Hadamard 矩阵固定。[SpinQuant](https://arxiv.org/abs/2405.16406) 学习正交旋转，[HARP](https://arxiv.org/abs/2605.29843) 用 Hadamard 初始化结构化变换。两者从训练后量化迁移到 RL 都需要适配。 |
-| **动态 SmoothQuant** | 已实现，待 GPU 验证 | 在用户固定的低精度层范围内添加或刷新通道缩放，与该层当前方案配对比较 | 作用于选定的 MLP 下投影，支持周期校准、保存检查点后审核，以及导入外部缩放因子。[运行流程](docs/recipes/dynamic-smoothquant.zh-CN.md) · [SmoothQuant 原文](https://arxiv.org/abs/2211.10438) |
+| **动态 SmoothQuant** | 已实现，待 GPU 验证 | 在用户固定的低精度层范围内添加或刷新逐通道平滑因子，与该层当前方案配对比较 | 作用于选定的 MLP 下投影，支持周期校准、保存检查点后审核，以及导入外部平滑因子。[运行流程](docs/recipes/dynamic-smoothquant.zh-CN.md) · [SmoothQuant 原文](https://arxiv.org/abs/2211.10438) |
 | **Calibrated Clipping** | 计划中 | 校准 PPO 的裁剪边界，减少 FP8 概率比失真对有效更新的抑制 | 原文每 20 步对当前和旧策略各做一次 BF16 前向，结果用于校准裁剪边界。这两次前向不做梯度计算或参数更新。[威斯康星大学麦迪逊分校与字节 Seed 论文](https://arxiv.org/abs/2609.22870) |
 | **TRIAGE 训推偏差修正** | 研究中 | 结合优势值和训推 log-prob 差异为轨迹片段重新加权，限制可能放大偏差的更新 | 面向原生 NVFP4 W4A4 训练与采样，需保留行为策略的 log-prob 并接入 loss。修正后的真实梯度方向仍需检验。[TRIAGE](https://arxiv.org/abs/2610.07043) |
 | **FourSight 轨迹筛选** | 研究中 | 筛掉包含过多或连续出现低概率 token 的轨迹，概率由训练端评估 | FP4 RL 中的数据选择方法。需同时评估保留的数据量、采样成本及学习质量。[FourSight](https://arxiv.org/abs/2611.04887) |
@@ -113,9 +113,9 @@ QoreRL 希望让这些实验可复现、可控制，并逐步积累支持自动�
 
 ## 怎样使用校准流程
 
-先确定低精度层。例如把 `recipe_options.layers` 设为 `[7, 15, 20, 25]`，把 `smoothquant_layers` 设为 `[7, 15, 20]`。从第一批开始，四层的下投影都执行 MXFP8。如果开启 `allow_layer_expansion: true`，第 25 层可以在通过校准和批准后叠加 SmoothQuant。名单外各层继续用 BF16。用户也可以直接校准已知目标层，或在首次采样前导入已有的缩放因子。
+先确定低精度层。例如把 `recipe_options.layers` 设为 `[7, 15, 20, 25]`，把 `smoothquant_layers` 设为 `[7, 15, 20]`。从第一批开始，四层的下投影都执行 MXFP8。如果开启 `allow_layer_expansion: true`，第 25 层可以在通过校准和批准后叠加 SmoothQuant。名单外各层继续用 BF16。用户也可以直接校准已知目标层，或在首次采样前导入已有的平滑因子。
 
-周期校准时，训练端在同一批留出的激活行上比较当前方案和候选方案的误差。人工审核模式下，训练保存提案和检查点后退出。用户接受时，learner 和各 rollout 副本同步新的缩放因子。拒绝则沿用现行方案继续。预先授权自动批准时，仍然使用相同的证据、检查点和发布流程。[CPU 演练与原生配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
+周期校准时，训练端在同一批留出的激活行上比较当前方案和候选方案的误差。人工审核模式下，训练保存提案和检查点后退出。用户接受时，learner 和各 rollout 副本同步新的平滑因子。拒绝则沿用现行方案继续。预先授权自动批准时，仍然使用相同的证据、检查点和发布流程。[CPU 演练与原生配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
 两端配置一致后，还需要在实际引擎上验证数值是否一致，包括相关的组批方式、prefill 和 decode。每条轨迹都应记录生成它的权重版本和 recipe 版本。
 

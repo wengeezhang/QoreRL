@@ -2,25 +2,30 @@
 
 import hashlib
 import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from pathlib import Path
 
-from qorerl.recipes.calibration import make_scale_artifact, parse_scale_artifact
-from qorerl.recipes.state import down_proj_name
 
-
-def artifact_context(cfg):
-    return dict(model=cfg.model, model_revision=cfg.model_revision, recipe_id=cfg.policy_recipe_id)
-
-
-def prepare_review(cfg, policy, optimizer_steps, overrides, evidence):
+def prepare_review(policy, optimizer_steps, candidate, evidence):
     return {
-        "schema": 1,
+        "schema": 2,
         "source_policy": asdict(policy),
         "optimizer_steps": optimizer_steps,
-        "scale_artifact": make_scale_artifact(overrides, **artifact_context(cfg)),
+        "candidate": candidate,
         "evidence": evidence,
     }
+
+
+def review_candidate(review):
+    """Read the recipe payload without rewriting a previously approved review or its ID."""
+    schema = review.get("schema")
+    if type(schema) is not int or schema not in (1, 2):
+        raise ValueError("Unsupported calibration review schema")
+    key = "scale_artifact" if schema == 1 else "candidate"
+    candidate = review.get(key)
+    if not isinstance(candidate, dict):
+        raise ValueError("Calibration review is missing its recipe candidate")
+    return candidate
 
 
 def review_id(review):
@@ -56,26 +61,6 @@ def read_payload(checkpoint, review):
     if review is not None and hashlib.sha256(payload).hexdigest() != review["checkpoint_sha256"]:
         raise ValueError("Calibration checkpoint payload does not match the reviewed candidate")
     return payload
-
-
-def load_scales(cfg, artifact):
-    return parse_scale_artifact(artifact, **artifact_context(cfg))
-
-
-def load_initial_scales(cfg, artifact):
-    context = artifact_context(cfg)
-    recipe = cfg.recipe
-    if recipe.allow_layer_expansion and isinstance(artifact, dict):
-        # An offline fit for the same initial layers also fits the first batch
-        # of an expanding run. Saved proposals still require an exact policy.
-        fixed_recipe_id = replace(recipe, allow_layer_expansion=False).identity
-        if artifact.get("recipe_id") == fixed_recipe_id:
-            context["recipe_id"] = fixed_recipe_id
-    scales = parse_scale_artifact(artifact, **context)
-    initial = recipe.layers if recipe.smoothquant_layers is None else recipe.smoothquant_layers
-    if initial is not None and scales.keys() - {down_proj_name(i) for i in initial}:
-        raise ValueError("Startup scale artifact names a layer outside the initial SmoothQuant targets")
-    return scales
 
 
 def crosses_interval(before, after, interval):

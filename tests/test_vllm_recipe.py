@@ -260,10 +260,10 @@ def test_smoothquant_worker_refit_verifies_identity_and_rebuilds_effective_weigh
     tensors = {n: p.detach().clone() for n, p in model.named_parameters()}
     tensors[name] *= 0.5
     unit_id = installed.state.active_identity
-    new_scale = torch.linspace(0.25, 2, 128)
+    new_factor = torch.linspace(0.25, 2, 128)
     source = adapter.RecipeState(recipe)
     source.add_target(1, target.weight)
-    source.install_scales({name: new_scale})
+    source.install_smoothing_factors({name: new_factor})
     assert unit_id != source.active_identity
     loads = []
 
@@ -290,14 +290,14 @@ def test_smoothquant_worker_refit_verifies_identity_and_rebuilds_effective_weigh
         assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
             source.active_identity
         )
-        torch.testing.assert_close(quantized_inputs[-1], (tensors[name] * new_scale).bfloat16())
+        torch.testing.assert_close(quantized_inputs[-1], (tensors[name] * new_factor).bfloat16())
         torch.testing.assert_close(target.weight, tensors[name], rtol=0, atol=0)
         assert installed.report()["identity"] == source.active_identity
         x = torch.randn(3, 128, dtype=torch.bfloat16)
         target.quant_method.apply(target, x)
-        torch.testing.assert_close(target.quant_method.kernel.last_input, (x / new_scale).bfloat16())
+        torch.testing.assert_close(target.quant_method.kernel.last_input, (x / new_factor).bfloat16())
     # The active activation scales cannot be used with a carrier from another transform.
-    installed.state.install_scales({name: torch.ones(128)})
+    installed.state.install_smoothing_factors({name: torch.ones(128)})
     assert not installed.ready
     with pytest.raises(RuntimeError, match="cache is invalid"):
         target.quant_method.apply(target, x)
@@ -331,7 +331,7 @@ def test_worker_preserves_quantized_base_across_smoothquant_expansion(stub_runti
     assert len(quantized) == 2 and candidate_method.carrier is not None
     torch.testing.assert_close(quantized[0], target.weight, rtol=0, atol=0)
     assert outside.quant_method is bf16_method
-    assert set(installed.state.scales) == {initial}
+    assert set(installed.state.smoothing_factors) == {initial}
     assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
         source.active_identity
     )
@@ -342,19 +342,21 @@ def test_worker_preserves_quantized_base_across_smoothquant_expansion(stub_runti
     assert report["all_targets_executed"] and set(report["targets"]) == {initial, promoted}
     assert [entry["canonical_weight"] for entry in report["runtime_targets"]] == [promoted, initial]
 
-    new_scale = torch.linspace(0.25, 2, 128)
-    source.install_scales({**source.scales, promoted: new_scale})
+    new_factor = torch.linspace(0.25, 2, 128)
+    source.install_smoothing_factors({**source.smoothing_factors, promoted: new_factor})
     assert extension.qorerl_load_weights(tensors, source.to_dict(), source.active_identity) == (
         source.active_identity
     )
     assert installed.state.active_identity == source.active_identity and len(quantized) == 6
     assert outside.quant_method is bf16_method
-    torch.testing.assert_close(quantized[-2], (target.weight * new_scale).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(quantized[-2], (target.weight * new_factor).bfloat16(), rtol=0, atol=0)
     torch.testing.assert_close(target.weight, tensors[promoted], rtol=0, atol=0)
     assert not installed.report()["all_targets_executed"]
     candidate_method.apply(target, x)
     initial_method.apply(initial_method.layer, x)
-    torch.testing.assert_close(candidate_method.kernel.last_input, (x / new_scale).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(
+        candidate_method.kernel.last_input, (x / new_factor).bfloat16(), rtol=0, atol=0
+    )
     assert [entry["apply_calls"] for entry in installed.report()["runtime_targets"]] == [1, 1]
 
 
@@ -403,14 +405,14 @@ def test_nvfp4_refit_packs_weights_once_and_serves_nvfp4_without_flashinfer(stub
     torch.testing.assert_close(packed_weights[0].weight, target.weight)
     torch.testing.assert_close(consumed[0][0], x)
 
-    scale = torch.linspace(0.5, 2, 128)
-    installed.state.install_scales({method.name: scale})
+    factor = torch.linspace(0.5, 2, 128)
+    installed.state.install_smoothing_factors({method.name: factor})
     assert not installed.ready
     installed.refresh()
     method.apply(target, x)
     assert len(packed_weights) == 2 and consumed[-1][1] is packed_weights[1]
-    torch.testing.assert_close(packed_weights[1].weight, (target.weight * scale).bfloat16())
-    torch.testing.assert_close(consumed[-1][0], (x / scale).bfloat16())
+    torch.testing.assert_close(packed_weights[1].weight, (target.weight * factor).bfloat16())
+    torch.testing.assert_close(consumed[-1][0], (x / factor).bfloat16())
     report = installed.report()
     assert report["backend"] == "vllm_transformer_engine_native_nvfp4"
     assert report["runtime_targets"][0]["cache_bytes"] == 8224 and report["all_targets_executed"]
@@ -424,9 +426,9 @@ def test_smoothquant_rollout_requires_worker_ack_of_exact_scale_identity(stub_ru
     rollout = VLLMRollout.__new__(VLLMRollout)
     rollout.cfg = cfg
     rollout.policy_version = PolicyVersion(0, installed.state.active_identity)
-    scales = installed.state.scales
-    next(iter(scales.values()))[0] *= 2
-    installed.state.install_scales(scales)
+    factors = installed.state.smoothing_factors
+    next(iter(factors.values()))[0] *= 2
+    installed.state.install_smoothing_factors(factors)
     snapshot = WeightSnapshot(
         PolicyVersion(0, installed.state.active_identity),
         cfg.model,

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1040" viewBox="0 0 1024 1040" role="img" aria-labelledby="title desc" xml:lang="en">
   <title id="title">Dynamic SmoothQuant calibration and publication</title>
-  <desc id="desc">Each batch starts with sampling, learning and publishing the weights with the active scales. At a calibration boundary, replay the batch, discover outliers and compare candidate scales on held-out inputs. Save a checkpoint before approval. The learner installs accepted scales and all rollout replicas acknowledge the version before the next batch. Imported scales can be validated and applied at startup.</desc>
+  <desc id="desc">Each batch starts with sampling, learning and publishing the weights with the active smoothing factors. At a calibration boundary, replay the batch, discover outliers and compare candidate factors on held-out inputs. Save a checkpoint before approval. The learner installs accepted factors and all rollout replicas acknowledge the version before the next batch. Imported factors can be validated and applied at startup.</desc>
   <defs>
     <style>
       text { font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif; fill: #142e38; }
@@ -28,7 +28,7 @@
   <path d="M140 30v21" class="rule"/>
   <text x="158" y="47" class="small">Synchronous GRPO</text>
   <text x="42" y="103" class="title">Dynamic SmoothQuant calibration and publication</text>
-  <text x="44" y="139" class="body">Select the layers that use MXFP8 and the subset that also uses channel scales.</text>
+  <text x="44" y="139" class="body">Select the layers that use MXFP8 and the subset that also uses per-channel smoothing factors S.</text>
 
   <!-- The normal publish completes before calibration is considered. -->
   <rect x="40" y="168" width="944" height="92" rx="14" fill="#123944"/>
@@ -45,7 +45,7 @@
   <g font-size="17">
     <text x="98" y="237" style="fill:#c3dcd9">Sample a group per prompt</text>
     <text x="377" y="237" style="fill:#c3dcd9">Use group advantages</text>
-    <text x="681" y="237" style="fill:#c3dcd9">Use active scales and wait for acks</text>
+    <text x="681" y="237" style="fill:#c3dcd9">Use active S and wait for acks</text>
   </g>
   <path d="m293 205 8 8-8 8m296-16 8 8-8 8" fill="none" stroke="#82a9a9" stroke-width="2.5"/>
 
@@ -68,13 +68,13 @@
   <text x="104" y="383" class="body">Replay prefixes and observe inputs to eligible MXFP8 layers.</text>
   <path d="M553 348h36" class="route" marker-end="url(#forward)"/>
   <text x="611" y="349" class="label">Diagnostics only?</text>
-  <text x="611" y="381" class="body">Record layer outlier scores and keep the scales.</text>
+  <text x="611" y="381" class="body">Record layer outlier scores and keep S.</text>
 
   <circle cx="68" cy="461" r="17" fill="#13776c"/>
   <text x="68" y="467" class="number">2</text>
-  <text x="104" y="469" class="stage">Fit and validate scales</text>
-  <text x="104" y="505" class="body">Fit scales on one subset. Test on held-out inputs.</text>
-  <text x="104" y="536" class="body">Compare against plain MXFP8 or MXFP8 with current scales.</text>
+  <text x="104" y="469" class="stage">Fit and validate S</text>
+  <text x="104" y="505" class="body">Fit S on one subset. Test on held-out inputs.</text>
+  <text x="104" y="536" class="body">Compare against plain MXFP8 or MXFP8 with current S.</text>
   <path d="M132 566H87" class="enter" marker-end="url(#entry)"/>
   <text x="146" y="571" class="small" style="fill:#634e9e">Already know the targets? Start with fitting.</text>
 
@@ -94,21 +94,21 @@
   <text x="68" y="646" class="number">3</text>
   <text x="104" y="649" class="stage">Checkpoint and review</text>
   <text x="104" y="684" class="body">Checkpoint only when a candidate meets the criteria.</text>
-  <text x="104" y="717" class="body">If no candidate qualifies, continue with the current scales.</text>
+  <text x="104" y="717" class="body">If no candidate qualifies, continue with the current S.</text>
   <path d="M582 637v89" stroke="#c4b9df" stroke-width="3" stroke-linecap="round"/>
   <text x="602" y="650" class="label" style="fill:#624e96">Manual</text>
   <text x="676" y="650" class="small">Pause and accept or reject on resume.</text>
   <text x="602" y="685" class="label" style="fill:#624e96">Auto</text>
   <text x="676" y="685" class="small">Accept candidates that meet the criteria.</text>
-  <text x="602" y="722" class="small">Rejected → keep current scales and resume.</text>
+  <text x="602" y="722" class="small">Rejected → keep current S and resume.</text>
 
   <circle cx="68" cy="804" r="17" fill="#13776c"/>
   <text x="68" y="810" class="number">4</text>
-  <text x="104" y="813" class="stage">Apply scales to both engines</text>
-  <text x="104" y="849" class="body">Learner installs scales and exports weights and recipe state.</text>
-  <text x="104" y="881" class="body">vLLM rebuilds quantized weights using the new scales.</text>
+  <text x="104" y="813" class="stage">Publish approved S</text>
+  <text x="104" y="849" class="body">Learner installs S and exports weights and recipe state.</text>
+  <text x="104" y="881" class="body">vLLM quantizes and packs W × S again.</text>
   <path d="M598 812h-48" class="enter" marker-end="url(#entry)"/>
-  <text x="611" y="817" class="label" style="fill:#624e96">Have scales at startup?</text>
+  <text x="611" y="817" class="label" style="fill:#624e96">Have smoothing factors at startup?</text>
   <text x="611" y="849" class="body">Validate and install before the first rollout.</text>
 
   <!-- Both startup import and an accepted refresh use the same publish barrier. -->

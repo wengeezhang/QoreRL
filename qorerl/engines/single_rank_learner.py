@@ -115,10 +115,7 @@ class SingleRankGRPOLearner:
 
                     cleanup.callback(module.register_forward_pre_hook(hook).remove)
             else:
-                state = self.recipe_state
-                observed = installation.weights
-                if state.spec.uses_smoothquant and not state.spec.allow_layer_expansion:
-                    observed = [name for name in observed if state.is_active(name)]
+                observed = self.recipe_state.observation_targets
                 if not observed:
                     return {}
                 capture = _CalibrationInputs(observed)
@@ -132,13 +129,14 @@ class SingleRankGRPOLearner:
         return {name: torch.cat(parts) for name, parts in capture.rows.items()}
 
     @torch.no_grad()
-    def prepare_calibration(self, batch):
-        """Inspect current activations or compare candidate scales without installing a transform."""
-        from qorerl.recipes.calibration import outlier_report, prepare
+    def prepare_candidate(self, batch):
+        """Replay a bounded activation window and let the recipe evaluate a possible update."""
+        from qorerl.recipes.calibration import outlier_report
 
         config = self.cfg.calibration
-        if not config.discovery_only and not self.cfg.recipe.uses_smoothquant:
-            raise ValueError("Calibration requires the SmoothQuant recipe")
+        handler = self.cfg.recipe.candidate_handler
+        if not config.discovery_only and handler is None:
+            raise ValueError("This recipe cannot prepare candidates")
         if batch.policy_version.recipe_id != self.policy_version.recipe_id or (
             self.policy_version.weight_version - batch.policy_version.weight_version not in (0, 1)
         ):
@@ -149,31 +147,17 @@ class SingleRankGRPOLearner:
             raise ValueError("Calibration requires a nonempty rollout batch with consistent policy identity")
         samples = self._sample_calibration_inputs(batch.trajectories, config.max_rows)
         if not samples:
-            return {}, []
+            return None, []
         if config.discovery_only:
-            return {}, outlier_report(samples, config)
-        return prepare(
-            {name: self.recipe_installation.weights[name] for name in samples},
-            samples,
-            self.recipe_state.scales,
-            config,
-            fprop=self.recipe_installation.linear,
-            allow_layer_expansion=self.cfg.recipe.allow_layer_expansion,
-        )
+            return None, outlier_report(samples, config)
+        return handler.prepare_candidate(self.cfg, self.recipe_state, self.recipe_installation, samples)
 
-    def apply_calibration(self, scales):
-        """Install a complete validated transform assembled from approved per-target changes."""
-        if not self.cfg.recipe.uses_smoothquant:
-            raise ValueError("Scale installation requires the SmoothQuant recipe")
-        current = self.recipe_state.scales
-        if (
-            not isinstance(scales, dict)
-            or not scales
-            or not scales.keys() <= self.recipe_state.targets.keys()
-        ):
-            raise ValueError("Scale overrides must name at least one eligible installed SmoothQuant target")
-        current.update(scales)
-        self.recipe_state.install_scales(current)
+    def apply_candidate(self, artifact, *, initial=False):
+        """Install the recipe payload and expose its new identity for weight publication."""
+        handler = self.cfg.recipe.candidate_handler
+        if handler is None:
+            raise ValueError("This recipe cannot apply candidates")
+        handler.apply_candidate(self.cfg, self.recipe_state, artifact, initial=initial)
         self.policy_version = PolicyVersion(
             self.policy_version.weight_version, self.recipe_state.active_identity
         )

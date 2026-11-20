@@ -246,8 +246,8 @@ def test_smoothquant_routes_unscaled_capture_and_maps_both_gradients(megatron_st
     installed = adapter.install(model, recipe, num_layers=2)
     assert installed.weights == {name: target.weight}
     before = target.weight.detach().clone()
-    scale = torch.linspace(0.25, 4, 64, dtype=torch.float32)
-    installed.state.install_scales({name: scale})
+    factor = torch.linspace(0.25, 4, 64, dtype=torch.float32)
+    installed.state.install_smoothing_factors({name: factor})
     captured = []
     installed.calibrator = SimpleNamespace(capture=lambda n, x: captured.append((n, x.detach().clone())))
     x = torch.randn(5, 2, 64, dtype=torch.float64, requires_grad=True)
@@ -261,15 +261,15 @@ def test_smoothquant_routes_unscaled_capture_and_maps_both_gradients(megatron_st
     assert captured[0][0] == name
     torch.testing.assert_close(captured[0][1], x, rtol=0, atol=0)
     effective_x, effective_w = megatron_stubs.calls[0]
-    torch.testing.assert_close(effective_x, x / scale, rtol=0, atol=0)
-    torch.testing.assert_close(effective_w, before * scale, rtol=0, atol=0)
+    torch.testing.assert_close(effective_x, x / factor, rtol=0, atol=0)
+    torch.testing.assert_close(effective_w, before * factor, rtol=0, atol=0)
     torch.testing.assert_close(y, y_ref, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(x.grad, x_ref.grad, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(target.weight.grad, reference.weight.grad, rtol=1e-12, atol=1e-12)
     torch.testing.assert_close(target.weight, before, rtol=0, atol=0)
 
 
-def test_smoothquant_expansion_and_resume_keep_base_quantized(megatron_stubs):
+def test_smoothquant_expansion_and_resume_keep_base_quantized(megatron_stubs, smoothing_artifact):
     cfg = TrainConfig(
         recipe_id=MXFP8_SMOOTHQUANT,
         recipe_options={"layers": [0, 1], "smoothquant_layers": [1], "allow_layer_expansion": True},
@@ -296,8 +296,8 @@ def test_smoothquant_expansion_and_resume_keep_base_quantized(megatron_stubs):
     torch.testing.assert_close(raw_w, layer.weight, rtol=0, atol=0)
     assert installation.report()["calls"] == {promoted: 1, initial: 1}
     assert outside.forward.__func__ is TERowParallelLinear.forward
-    scale = torch.linspace(0.5, 2, 64)
-    promoted_policy = learner.apply_calibration({promoted: scale})
+    factor = torch.linspace(0.5, 2, 64)
+    promoted_policy = learner.apply_candidate(smoothing_artifact(cfg, {promoted: factor}))
     assert promoted_policy.weight_version == initial_policy.weight_version
     assert promoted_policy.recipe_id != initial_policy.recipe_id
     promoted_checkpoint = learner.checkpoint()
@@ -311,9 +311,9 @@ def test_smoothquant_expansion_and_resume_keep_base_quantized(megatron_stubs):
         assert learner.recipe_state.is_active(promoted) == active
         assert len(megatron_stubs.calls) == 1
         effective_x, effective_w = megatron_stubs.calls[0]
-        torch.testing.assert_close(effective_x, (x / scale).bfloat16() if active else x, rtol=0, atol=0)
+        torch.testing.assert_close(effective_x, (x / factor).bfloat16() if active else x, rtol=0, atol=0)
         torch.testing.assert_close(
-            effective_w, (layer.weight * scale).bfloat16() if active else layer.weight, rtol=0, atol=0
+            effective_w, (layer.weight * factor).bfloat16() if active else layer.weight, rtol=0, atol=0
         )
         assert outside.forward.__func__ is TERowParallelLinear.forward
         torch.testing.assert_close(model.state_dict(), before, rtol=0, atol=0)
@@ -341,8 +341,8 @@ def test_nvfp4_dispatch_and_calibration_share_the_selected_kernel(megatron_stubs
     installed = adapter.install(model, cfg.recipe, num_layers=2)
     assert installed.linear is nvfp4_linear  # Native calibration probes reuse the actual FPROP.
     smooth = down_proj_name(1)
-    scale = torch.linspace(0.5, 2, 64)
-    installed.state.install_scales({smooth: scale})
+    factor = torch.linspace(0.5, 2, 64)
+    installed.state.install_smoothing_factors({smooth: factor})
     direct_layer, smooth_layer = [layer.mlp.linear_fc2 for layer in model.decoder.layers]
     x = torch.randn(2, 64, dtype=torch.bfloat16)
     direct_layer(x)[0].sum().backward()
@@ -351,8 +351,8 @@ def test_nvfp4_dispatch_and_calibration_share_the_selected_kernel(megatron_stubs
     assert len(calls) == 2 and direct_layer.weight.grad is not None and smooth_layer.weight.grad is not None
     torch.testing.assert_close(calls[0][0], x, rtol=0, atol=0)
     torch.testing.assert_close(calls[0][1], direct_layer.weight, rtol=0, atol=0)
-    torch.testing.assert_close(calls[1][0], (x / scale).bfloat16(), rtol=0, atol=0)
-    torch.testing.assert_close(calls[1][1], (smooth_layer.weight * scale).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(calls[1][0], (x / factor).bfloat16(), rtol=0, atol=0)
+    torch.testing.assert_close(calls[1][1], (smooth_layer.weight * factor).bfloat16(), rtol=0, atol=0)
     assert installed.report()["fprop"] == installed.report()["wgrad"] == "nvfp4_e2m1"
 
 
@@ -386,8 +386,8 @@ def test_native_discovery_observes_existing_operator_and_removes_capture(megatro
     before = copy.deepcopy(model.state_dict())
     fc2s = [layer.mlp.linear_fc2 for layer in model.module.decoder.layers]
     forwards = [module.forward for module in fc2s]
-    overrides, evidence = learner.prepare_calibration(batch)
-    assert not overrides and learner.policy_version == policy
+    candidate, evidence = learner.prepare_candidate(batch)
+    assert candidate is None and learner.policy_version == policy
     assert {e["target"] for e in evidence} == (
         {down_proj_name(1)} if cfg.recipe.is_mxfp8 else {down_proj_name(0), down_proj_name(1)}
     )
@@ -402,7 +402,7 @@ def test_native_discovery_observes_existing_operator_and_removes_capture(megatro
 
     learner.logits = fail
     with pytest.raises(RuntimeError, match="injected replay error"):
-        learner.prepare_calibration(batch)
+        learner.prepare_candidate(batch)
     assert [module.forward for module in fc2s] == forwards
     assert all(not module._forward_pre_hooks for module in fc2s)
     if learner.recipe_installation is None:

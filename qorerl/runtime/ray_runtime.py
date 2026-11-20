@@ -12,11 +12,10 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
 from qorerl.runtime.calibration import (
     crosses_interval,
-    load_initial_scales,
-    load_scales,
     prepare_review,
     read_payload,
     read_review,
+    review_candidate,
     review_id,
 )
 from qorerl.runtime.checkpoint import resume_metadata, save_checkpoint, write_json
@@ -58,10 +57,12 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
     if decision and not resume:
         raise ValueError("Calibration decisions require --resume")
     review = read_review(resume, metadata, cfg, decision, candidate_id) if resume else None
-    calibration = cfg.calibration if cfg.recipe_calibration or cfg.recipe.uses_smoothquant else None
+    calibration = cfg.active_calibration
     imported = None
-    if not resume and calibration and calibration.scale_artifact:
-        imported = load_initial_scales(cfg, json.loads(Path(calibration.scale_artifact).read_text()))
+    if not resume and calibration and calibration.initial_artifact:
+        imported = json.loads(Path(calibration.initial_artifact).read_text())
+        if not isinstance(imported, dict):
+            raise ValueError("An initial recipe artifact must be a JSON object")
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
     write_json(directory / "config.json", cfg.to_dict())
@@ -122,14 +123,16 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 raise RuntimeError("Rollout acknowledgment does not match the expected policy")
             return versions[0]
 
-        def apply(scales):
-            expected = ray.get(learner.apply_calibration.remote(scales), timeout=cfg.rpc_timeout)
+        def apply_and_publish(candidate):
+            expected = ray.get(learner.apply_candidate.remote(candidate), timeout=cfg.rpc_timeout)
             return policy_version if expected == policy_version else publish(expected)
 
         event_log = directory / "calibration.jsonl"
         expected = ray.get(learner.current_policy.remote(), timeout=cfg.rpc_timeout) if calibration else None
         if imported is not None:
-            expected = ray.get(learner.apply_calibration.remote(imported), timeout=cfg.rpc_timeout)
+            expected = ray.get(
+                learner.apply_candidate.remote(imported, initial=True), timeout=cfg.rpc_timeout
+            )
         policy_version = publish(expected)
         first_step = metadata["step"] if metadata else 0
         if policy_version.weight_version != first_step or (
@@ -138,7 +141,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
             raise RuntimeError("Published policy and coordinator progress disagree")
         if review is not None:
             if decision != "reject":
-                policy_version = apply(load_scales(cfg, review["scale_artifact"]))
+                policy_version = apply_and_publish(review_candidate(review))
             append_json(
                 event_log,
                 {
@@ -154,7 +157,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 event_log,
                 {
                     "event": "imported",
-                    "source": calibration.scale_artifact,
+                    "source": calibration.initial_artifact,
                     "step": first_step,
                     "policy": asdict(policy_version),
                 },
@@ -224,8 +227,8 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 completed_updates, metrics["optimizer_steps"], calibration.refresh_every_optimizer_steps
             ):
                 evaluation_start = time.perf_counter()
-                overrides, evidence = ray.get(
-                    learner.prepare_calibration.remote(batch_ref), timeout=cfg.rpc_timeout
+                candidate, evidence = ray.get(
+                    learner.prepare_candidate.remote(batch_ref), timeout=cfg.rpc_timeout
                 )
                 append_json(
                     event_log,
@@ -239,10 +242,8 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                         "evidence": evidence,
                     },
                 )
-                if overrides:
-                    review = prepare_review(
-                        cfg, policy_version, metrics["optimizer_steps"], overrides, evidence
-                    )
+                if candidate is not None:
+                    review = prepare_review(policy_version, metrics["optimizer_steps"], candidate, evidence)
                     last_checkpoint = save_checkpoint(
                         directory, learner, cfg, step, policy_version, review=review
                     )
@@ -259,7 +260,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                             },
                         )
                         break
-                    policy_version = apply(load_scales(cfg, review["scale_artifact"]))
+                    policy_version = apply_and_publish(candidate)
                     applied = True
                     append_json(
                         event_log,

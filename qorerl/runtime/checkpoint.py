@@ -2,7 +2,6 @@
 
 import hashlib
 import json
-import re
 from dataclasses import asdict
 from pathlib import Path
 
@@ -74,13 +73,7 @@ def resume_metadata(path, cfg):
         raise ValueError(f"Resume currently requires identical training semantics; changed: {changed}")
     key = "policy" if schema == 1 else "policy_version"
     policy_version = PolicyVersion.from_dict(metadata[key])
-    valid_recipe = policy_version.recipe_id == cfg.policy_recipe_id
-    if cfg.recipe.uses_smoothquant:
-        valid_recipe = (
-            re.fullmatch(re.escape(cfg.policy_recipe_id) + r":[0-9a-f]{64}", policy_version.recipe_id)
-            is not None
-        )
-    if not valid_recipe:
+    if not cfg.recipe.accepts_policy_identity(policy_version.recipe_id):
         raise ValueError(
             "Checkpoint policy recipe differs from the configured recipe or uses an incompatible scope"
         )

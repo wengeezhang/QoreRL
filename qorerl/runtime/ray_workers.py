@@ -34,11 +34,11 @@ class RayLearnerWorker:
     def completed_updates(self):
         return self.engine.optimizer_steps
 
-    def prepare_calibration(self, batch):
-        return self.engine.prepare_calibration(batch)
+    def prepare_candidate(self, batch):
+        return self.engine.prepare_candidate(batch)
 
-    def apply_calibration(self, scales):
-        return self.engine.apply_calibration(scales)
+    def apply_candidate(self, artifact, *, initial=False):
+        return self.engine.apply_candidate(artifact, initial=initial)
 
     def export_weights(self):
         return self.engine.export_weights()

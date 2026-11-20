@@ -36,12 +36,12 @@ class _MXFP8Backend:
         return self.kernel(config)
 
     def pack(self, weight, kernel):
-        values, scales = self.quantize(weight, is_sf_swizzled_layout=False)
-        if values.dtype != torch.float8_e4m3fn or scales.dtype != torch.uint8:
-            raise RuntimeError("Unexpected native MXFP8 payload or E8M0 scale dtype")
+        quantized_weight, block_scales = self.quantize(weight, is_sf_swizzled_layout=False)
+        if quantized_weight.dtype != torch.float8_e4m3fn or block_scales.dtype != torch.uint8:
+            raise RuntimeError("Unexpected native MXFP8 payload or E8M0 block scale dtype")
         carrier = torch.nn.Module()
-        carrier.register_parameter("weight", torch.nn.Parameter(values, requires_grad=False))
-        carrier.register_parameter("weight_scale", torch.nn.Parameter(scales, requires_grad=False))
+        carrier.register_parameter("weight", torch.nn.Parameter(quantized_weight, requires_grad=False))
+        carrier.register_parameter("weight_scale", torch.nn.Parameter(block_scales, requires_grad=False))
         kernel.process_weights_after_loading(carrier)
         return carrier
 
@@ -203,12 +203,12 @@ class VLLMRecipeInstallation:
         self.backend = backend
         self.methods = methods
         self._ready = False
-        self._cache_scale_digest = None
+        self._cached_smoothing_factor_digest = None
         self.refresh_count = 0
 
     @property
     def ready(self):
-        return self._ready and self._cache_scale_digest == self.state.scale_digest
+        return self._ready and self._cached_smoothing_factor_digest == self.state.smoothing_factor_digest
 
     def invalidate(self):
         self._ready = False
@@ -231,7 +231,7 @@ class VLLMRecipeInstallation:
             method.carrier = carrier
             method.apply_calls = 0
         self.refresh_count += 1
-        self._cache_scale_digest = self.state.scale_digest
+        self._cached_smoothing_factor_digest = self.state.smoothing_factor_digest
         self._ready = True
 
     def report(self):

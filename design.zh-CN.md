@@ -42,7 +42,7 @@ uv run qorerl train --config configs/grpo_cpu_smoothquant.json --out runs/sq-rev
 
 ## 3. 以动态 SmoothQuant 为例
 
-SmoothQuant 给一个线性层的输入通道配一组缩放因子 `S`。计算时，每个输入通道除以自己的 S，权重的对应列乘以同一个 S，然后量化。对这份 recipe，用户可以控制低精度计算覆盖哪些层、哪些层额外使用 S，以及训练中是否允许更换 S。
+SmoothQuant 给一个线性层的每个输入通道分配一个平滑因子，组成向量 `S`。计算时，每个输入通道除以自己的 S，权重的对应列乘以同一个 S，然后由后端量化器计算块 scale 并打包。对这份 recipe，用户可以控制低精度计算覆盖哪些层、哪些层额外使用 S，以及训练中是否允许更换 S。
 
 ### 用户怎样设置范围和权限？
 
@@ -55,7 +55,7 @@ SmoothQuant 给一个线性层的输入通道配一组缩放因子 `S`。计算�
 | 可提议的变更 | `discover_outliers: true`，`max_activation_relative_l2: 0.05` | 可为前三层刷新 S，也可提议给第 25 层首次加 S。候选的局部输出误差须改善，首次启用还要求候选的相对误差不超过 5%。 |
 | 批准方式 | `approval: "manual"` | 有合格候选时保存并暂停。用户接受或拒绝后从检查点继续。选 `"auto"` 则自动应用满足同样条件的候选。 |
 
-同一份 recipe 也可以用得更简单。已有离线 S 时，提供 `scale_artifact` 并设 `refresh_every_optimizer_steps: 0`，训练全程使用导入的配置。只想看异常时可选 `discovery_only: true`。若只允许刷新现有 S，沿用默认的 `allow_layer_expansion: false`，校准只覆盖初始启用 S 的层。[各使用场景与配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
+同一份 recipe 也可以用得更简单。已有离线 S 时，提供 `initial_artifact` 并设 `refresh_every_optimizer_steps: 0`，训练全程使用导入的配置。只想看异常时可选 `discovery_only: true`。若只允许刷新现有 S，沿用默认的 `allow_layer_expansion: false`，校准只覆盖初始启用 S 的层。[各使用场景与配置](docs/recipes/dynamic-smoothquant.zh-CN.md)
 
 <a id="smoothquant-expansion"></a>
 
@@ -84,7 +84,7 @@ SmoothQuant 给一个线性层的输入通道配一组缩放因子 `S`。计算�
 
 ## 4. 框架怎样执行这套流程
 
-QoreRL 当前的原生实现采用同步 GRPO。**编排端安排工作，Ray worker 承接远程调用，后端引擎完成数值计算。** 引入新方法时，它的量化算子、需要保存的参数、候选比较逻辑由 recipe 及其后端适配实现。编排端决定什么时候发布、发布给哪些副本、什么时候开始下一批采样。
+QoreRL 当前的原生实现采用同步 GRPO。**编排端安排工作，Ray worker 承接远程调用，后端引擎完成数值计算。** 引入新方法时，它的量化算子、需要保存的参数、候选比较逻辑由 recipe 及其后端适配实现。编排端向 learner 请求候选及证据，把返回的提案与检查点绑定，处理审批并发布获准版本。Learner 把拟合与应用委托给当前 recipe 的候选处理函数。
 
 ![同步 GRPO 系统架构。编排端协调 Ray learner 与 rollout worker，训练端更新并导出策略快照，采样端安装并确认版本后才能开始下一批。](docs/assets/framework-architecture.zh-CN.svg)
 
@@ -99,7 +99,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 | 训练编排 | 调度采样、更新和发布，在批次边界触发校准、保存或暂停 | [run_sync_grpo](qorerl/runtime/ray_runtime.py) |
 | Ray worker | 持有各自的引擎、接收远程调用、报告就绪状态与版本 | [ray_workers.py](qorerl/runtime/ray_workers.py) |
 | 后端引擎 | Megatron / Transformer Engine 执行训练并导出权重，vLLM 安装权重并生成回答 | [Megatron learner](qorerl/engines/megatron.py) · [vLLM rollout](qorerl/engines/vllm.py) |
-| 精度 recipe | 定义选层和数值变换，保存变换状态。支持校准的方法还负责生成并验证候选 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [校准](qorerl/recipes/calibration.py) |
+| 精度 recipe | 定义选层和数值变换，保存变换状态。支持校准的方法还负责生成并验证候选 | [规格](qorerl/recipes/spec.py) · [状态](qorerl/recipes/state.py) · [异常发现](qorerl/recipes/calibration.py) · [SmoothQuant 候选](qorerl/recipes/smoothquant.py) |
 | 任务、算法与数据 | 实现任务和奖励、组内优势、loss、轨迹校验和批处理 | [任务](qorerl/training/tasks.py) · [目标函数](qorerl/training/objective.py) · [轨迹协议](qorerl/training/contracts.py) · [批处理](qorerl/training/batching.py) |
 | 独立观测 | Recipe Insights 在采集的操作数上重放固定方案，记录逐层误差和耗时 | [Recipe Insights](docs/recipe-insights.zh-CN.md) |
 
@@ -107,7 +107,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 
 每批轨迹带有 `PolicyVersion(weight_version, recipe_id)`。前者标识权重的发布代次，后者标识 recipe。动态 SmoothQuant 的 `recipe_id` 还包含已生效的各层 S 的内容摘要。因此只改 S 也会得到一个可区分的策略版本。Learner 保留原坐标系下的参数和优化器状态，rollout 按新状态更新用于推理的权重缓存。若发布失败，编排端停止运行，并在故障记录中给出最近的完整恢复点。[版本标识](qorerl/recipes/state.py) · [加载和确认](qorerl/engines/vllm.py)
 
-有待审候选时，框架把候选及证据绑定到**应用变更之前**的检查点。接受和拒绝都能从这个位置继续，人工和自动批准走同一条发布路径。恢复时还会检查 recipe 是否兼容。早期允许将 BF16 层升级为 MXFP8 的扩层检查点与当前选层规则不兼容，使用新规则需重新开始运行。[审核与恢复](qorerl/runtime/calibration.py) · [兼容性检查](qorerl/runtime/checkpoint.py)
+有待审候选时，框架把候选及证据绑定到**应用变更之前**的检查点。接受和拒绝都能从这个位置继续，人工和自动批准走同一条发布路径。schema 2 的审核记录将 recipe 提案保存在 `candidate`。恢复也支持 schema 1 记录，会从原来的 `scale_artifact` 字段读取提案并核对原候选 ID。早期允许将 BF16 层升级为 MXFP8 的扩层检查点与当前选层规则不兼容，使用新规则需重新开始运行。[审核与恢复](qorerl/runtime/calibration.py) · [兼容性检查](qorerl/runtime/checkpoint.py)
 
 ### 一次人工确认会写下哪些文件？
 
@@ -117,7 +117,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 | --- | --- | --- |
 | 训练为什么停了，从哪里继续？ | 运行目录的 `summary.json` | `status` 是 `awaiting_review`。`checkpoint` 指向 `checkpoints/step-000001-before-calibration/`，`candidate_id` 是接受或拒绝时要传的完整 ID。 |
 | 保存时实际生效的是哪个版本？ | 上述检查点的 `metadata.json` | 第 1 批的权重已经发布，第 0、1 层执行低精度计算，此时只有第 1 层启用 SmoothQuant。`policy_version` 标识当时生效的策略，`pending_candidate` 指向待审提案。普通检查点也有这份元数据，只有带候选的检查点才有这个字段和同目录的 `candidate.json`。 |
-| 这次准备改哪一层，凭什么改？ | 同一检查点的 `candidate.json` | `evidence` 记录所有被评估的层。第 0 层为 `proposed`，第 1 层为 `no_gain`，第 2 层在范围外，证据中没有它的记录。真正要发布的新 S 只出现在 `scale_artifact.scales` 的第 0 层条目里。 |
+| 这次准备改哪一层，凭什么改？ | 同一检查点的 `candidate.json` | `evidence` 记录所有被评估的层。第 0 层为 `proposed`，第 1 层为 `no_gain`，第 2 层在范围外，证据中没有它的记录。真正要发布的新 S 只出现在 `candidate.scales` 的第 0 层条目里。 |
 | 用户的决定生效了吗？ | 运行目录的 `calibration.jsonl`，每行一个事件 | 原目录依次记录 `evaluated`、`awaiting_review`。人工接受并续训后，**新输出目录**记录 `applied`，选择拒绝则记录 `rejected`。接受分支的第 2 批在 `trajectories.jsonl` 中，每条轨迹的 `policy_version` 都与 `applied.policy` 一致。 |
 
 <details>
@@ -133,7 +133,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
     "weight_version": 1,
     "recipe_id": "mxfp8-smoothquant-mlp-down-v1:52badf3f31e93eab:b6e1880eba09c4845b562a93519ba3b449033125469094a655ac9506de039c25"
   },
-  "pending_candidate": "4c65a5ecaf946494d4823a5b482433126f8616b1dd52acb75b765d27f6931428",
+  "pending_candidate": "11d7fc41a73a6574ec851641096955b8a054c64a296ec79f9da6cb7801b7e84d",
   "boundary": "all_rollouts_acknowledged_no_inflight_samples"
 }
 ```
@@ -142,8 +142,9 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 
 ```json
 {
+  "schema": 2,
   "optimizer_steps": 1,
-  "scale_artifact": {
+  "candidate": {
     "kind": "smoothquant_scales",
     "scales": {
       "model.layers.0.mlp.down_proj.weight": [
@@ -174,7 +175,7 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 {
   "status": "awaiting_review",
   "last_step": 1,
-  "candidate_id": "4c65a5ecaf946494d4823a5b482433126f8616b1dd52acb75b765d27f6931428"
+  "candidate_id": "11d7fc41a73a6574ec851641096955b8a054c64a296ec79f9da6cb7801b7e84d"
 }
 ```
 

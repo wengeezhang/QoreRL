@@ -18,9 +18,9 @@ def _emulated_mxfp8_operand(value):
         blocks = value.float().reshape(-1, 32)
         maximum = blocks.abs().amax(dim=-1, keepdim=True)
         exponent = (torch.floor(maximum.log2()) - 8).clamp(-127, 127)
-        scale = torch.exp2(exponent)
-        rounded = (blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float()
-        rounded = (rounded * scale).reshape_as(value).to(value.dtype)
+        block_scales = torch.exp2(exponent)
+        rounded = (blocks / block_scales).clamp(-448, 448).to(torch.float8_e4m3fn).float()
+        rounded = (rounded * block_scales).reshape_as(value).to(value.dtype)
     # An explicit straight-through derivative exercises canonical optimizer updates.
     return rounded + (value - value.detach())
 
@@ -90,7 +90,7 @@ class TestLM(nn.Module):
             state = self.installation.state
             report.update(
                 identity=state.active_identity,
-                scale_digest=state.scale_digest,
+                smoothing_factor_digest=state.smoothing_factor_digest,
                 targets=dict(state.targets),
                 smoothquant_targets=sorted(name for name in state.targets if state.is_active(name)),
                 fprop="cpu_emulated_rowwise_block32_e4m3_bf16_linear",
@@ -119,7 +119,7 @@ class TestLearner(SingleRankGRPOLearner):
         state = None
         if self.recipe_installation is not None:
             if self.policy_version.recipe_id != self.recipe_state.active_identity:
-                raise ValueError("Export policy does not match active SmoothQuant scales")
+                raise ValueError("Export policy does not match active SmoothQuant smoothing factors")
             self.recipe_state.validate_weights(tensors)
             state = self.recipe_state.to_dict()
         return WeightSnapshot(self.policy_version, self.cfg.model, tensors, state)

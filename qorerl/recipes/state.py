@@ -1,8 +1,9 @@
 """Canonical transform state shared by learner, checkpoint and rollout.
 
 Model parameters stay in the original basis. Hadamard signs are fixed by the
-recipe. SmoothQuant scales start at one, and a calibration commit replaces the
-entire mapping. Its content digest identifies the transform used by a policy.
+recipe. SmoothQuant uses one smoothing factor per input channel. The factors
+start at one, and a calibration commit replaces the entire mapping. Its
+content digest identifies the transform used by a policy.
 """
 
 import hashlib
@@ -16,12 +17,15 @@ def down_proj_name(index):
     return f"model.layers.{index}.mlp.down_proj.weight"
 
 
-def scale_digest(scales):
+def smoothing_factor_digest(smoothing_factors):
     """SHA-256 of sorted target names and their length-framed little-endian FP32 vectors."""
-    if not isinstance(scales, dict) or any(not isinstance(name, str) for name in scales):
-        raise ValueError("SmoothQuant requires named scale vectors")
+    if not isinstance(smoothing_factors, dict) or any(
+        not isinstance(name, str) for name in smoothing_factors
+    ):
+        raise ValueError("SmoothQuant requires named smoothing factor vectors")
+    # This domain tag is part of the checkpoint and policy identity contract.
     digest = hashlib.sha256(b"qorerl.smoothquant.scales.v1\x00")
-    for name, value in sorted(scales.items()):
+    for name, value in sorted(smoothing_factors.items()):
         if (
             not isinstance(value, torch.Tensor)
             or value.device.type != "cpu"
@@ -33,7 +37,9 @@ def scale_digest(scales):
             or not torch.isfinite(value).all().item()
             or not (value > 0).all().item()
         ):
-            raise ValueError(f"SmoothQuant scale must be a finite positive fixed CPU float32 vector: {name}")
+            raise ValueError(
+                f"Smoothing factors must form a finite positive fixed CPU float32 vector: {name}"
+            )
         encoded = name.encode("utf-8")
         digest.update(len(encoded).to_bytes(8, "little"))
         digest.update(encoded)
@@ -42,14 +48,14 @@ def scale_digest(scales):
     return digest.hexdigest()
 
 
-def smooth_input(value, scale):
+def smooth_input(value, smoothing_factors):
     """Apply the fixed 1/S diagonal on the input channels before quantization."""
-    return (value / scale.to(value.device)).to(value.dtype)
+    return (value / smoothing_factors.to(value.device)).to(value.dtype)
 
 
-def smooth_weight(value, scale):
+def smooth_weight(value, smoothing_factors):
     """Apply the fixed S diagonal on canonical weight columns before quantization."""
-    return (value * scale.to(value.device)).to(value.dtype)
+    return (value * smoothing_factors.to(value.device)).to(value.dtype)
 
 
 class RecipeState:
@@ -58,33 +64,39 @@ class RecipeState:
         self.targets = {}
         self._signs = {}
         self._transforms = {}
-        self._initial_scale_targets = set()
-        self._scales = {}
-        self._scale_digest = None
-        self._device_scales = {}
+        self._initial_smoothing_targets = set()
+        self._smoothing_factors = {}
+        self._smoothing_factor_digest = None
+        self._device_smoothing_factors = {}
 
     @property
     def signs(self):
         return {name: value.clone() for name, value in self._signs.items()}
 
     @property
-    def scales(self):
-        return {name: value.clone() for name, value in self._scales.items()}
+    def smoothing_factors(self):
+        return {name: value.clone() for name, value in self._smoothing_factors.items()}
 
     @property
-    def scale_digest(self):
-        if self.spec.uses_smoothquant and self._scale_digest is None:
-            self._scale_digest = scale_digest(self._scales)
-        return self._scale_digest
+    def smoothing_factor_digest(self):
+        if self.spec.uses_smoothquant and self._smoothing_factor_digest is None:
+            self._smoothing_factor_digest = smoothing_factor_digest(self._smoothing_factors)
+        return self._smoothing_factor_digest
 
     @property
     def active_identity(self):
         if self.spec.uses_smoothquant:
-            return f"{self.spec.identity}:{self.scale_digest}"
+            return f"{self.spec.identity}:{self.smoothing_factor_digest}"
         return self.spec.identity
 
     def is_active(self, name):
-        return name in (self._scales if self.spec.uses_smoothquant else self.targets)
+        return name in (self._smoothing_factors if self.spec.uses_smoothquant else self.targets)
+
+    @property
+    def observation_targets(self):
+        if self.spec.uses_smoothquant and not self.spec.allow_layer_expansion:
+            return self._smoothing_factors.keys()
+        return self.targets.keys()
 
     def add_target(self, index, weight, *, active=None):
         name = down_proj_name(index)
@@ -108,39 +120,41 @@ class RecipeState:
             self._signs[name] = make_signs(weight.shape[1], self.spec.seed + index)
             self._transforms[name] = PreparedHadamard(self._signs[name], self.spec.hadamard_block_size)
         if self.spec.uses_smoothquant and active:
-            self._initial_scale_targets.add(name)
-            self._scales[name] = torch.ones(weight.shape[1], dtype=torch.float32, device="cpu")
-            self._scale_digest = None
+            self._initial_smoothing_targets.add(name)
+            self._smoothing_factors[name] = torch.ones(weight.shape[1], dtype=torch.float32, device="cpu")
+            self._smoothing_factor_digest = None
         self.targets[name] = tuple(weight.shape)
         return name
 
-    def _check_scales(self, scales):
-        eligible = self.targets.keys() if self.spec.allow_layer_expansion else self._initial_scale_targets
+    def _check_smoothing_factors(self, smoothing_factors):
+        eligible = self.targets.keys() if self.spec.allow_layer_expansion else self._initial_smoothing_targets
         if (
             not self.spec.uses_smoothquant
-            or not isinstance(scales, dict)
-            or not self._initial_scale_targets <= scales.keys() <= eligible
+            or not isinstance(smoothing_factors, dict)
+            or not self._initial_smoothing_targets <= smoothing_factors.keys() <= eligible
         ):
             raise ValueError(
-                "SmoothQuant scales must cover every initial target and stay within eligible targets"
+                "Smoothing factors must cover every initial target and stay within eligible targets"
             )
-        digest = scale_digest(scales)
-        for name, value in scales.items():
+        digest = smoothing_factor_digest(smoothing_factors)
+        for name, value in smoothing_factors.items():
             if value.shape != (self.targets[name][1],):
-                raise ValueError(f"SmoothQuant scale width mismatch for {name}")
+                raise ValueError(f"SmoothQuant smoothing factor width mismatch for {name}")
         return digest
 
-    def install_scales(self, scales):
-        digest = self._check_scales(scales)
-        self._scales = {name: value.contiguous().clone() for name, value in scales.items()}
-        self._scale_digest = digest
-        self._device_scales.clear()
+    def install_smoothing_factors(self, smoothing_factors):
+        digest = self._check_smoothing_factors(smoothing_factors)
+        self._smoothing_factors = {
+            name: value.contiguous().clone() for name, value in smoothing_factors.items()
+        }
+        self._smoothing_factor_digest = digest
+        self._device_smoothing_factors.clear()
 
-    def _scale_for(self, name, device):
+    def _smoothing_factors_for(self, name, device):
         key = (name, device)
-        if key not in self._device_scales:
-            self._device_scales[key] = self._scales[name].to(device)
-        return self._device_scales[key]
+        if key not in self._device_smoothing_factors:
+            self._device_smoothing_factors[key] = self._smoothing_factors[name].to(device)
+        return self._device_smoothing_factors[key]
 
     def rotate(self, value, name):
         if not self.spec.uses_hadamard:
@@ -148,13 +162,13 @@ class RecipeState:
         return self._transforms[name].apply(value)
 
     def transform_input(self, value, name):
-        if name in self._scales:
-            return smooth_input(value, self._scale_for(name, value.device))
+        if name in self._smoothing_factors:
+            return smooth_input(value, self._smoothing_factors_for(name, value.device))
         return self.rotate(value, name)
 
     def transform_weight(self, value, name):
-        if name in self._scales:
-            return smooth_weight(value, self._scale_for(name, value.device))
+        if name in self._smoothing_factors:
+            return smooth_weight(value, self._smoothing_factors_for(name, value.device))
         return self.rotate(value, name)
 
     def _metadata(self):
@@ -167,7 +181,8 @@ class RecipeState:
     def to_dict(self):
         result = {**self._metadata(), "signs": self.signs}
         if self.spec.uses_smoothquant:
-            result.update(scales=self.scales, scale_digest=self.scale_digest)
+            # Snapshots and checkpoints retain their original field names.
+            result.update(scales=self.smoothing_factors, scale_digest=self.smoothing_factor_digest)
         return result
 
     def validate(self, saved):
@@ -188,16 +203,16 @@ class RecipeState:
             if not isinstance(value, torch.Tensor) or not torch.equal(value.cpu(), signs):
                 raise ValueError(f"Recipe state mismatch: fixed signs for {name}")
         if self.spec.uses_smoothquant:
-            digest = self._check_scales(saved["scales"])
+            digest = self._check_smoothing_factors(saved["scales"])
             if saved["scale_digest"] != digest:
-                raise ValueError("SmoothQuant scale digest mismatch")
+                raise ValueError("SmoothQuant smoothing factor digest mismatch")
             return f"{self.spec.identity}:{digest}"
         return self.spec.identity
 
     def load(self, saved):
         self.validate(saved)
         if self.spec.uses_smoothquant:
-            self.install_scales(saved["scales"])
+            self.install_smoothing_factors(saved["scales"])
 
     def validate_weights(self, tensors):
         for name, shape in self.targets.items():
@@ -217,8 +232,8 @@ class RecipeState:
         }
         if self.spec.uses_smoothquant:
             report.update(
-                smoothquant_targets=sorted(self._scales),
-                scale_digest=self.scale_digest,
+                smoothquant_targets=sorted(self._smoothing_factors),
+                smoothing_factor_digest=self.smoothing_factor_digest,
                 preset_identity=self.spec.identity,
             )
         if self.spec.allow_layer_expansion:

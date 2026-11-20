@@ -17,7 +17,7 @@ def main():
     decision.add_argument(
         "--accept-candidate", metavar="ID", help="Resume and install this reviewed candidate"
     )
-    decision.add_argument("--reject-candidate", metavar="ID", help="Resume keeping the previous scales")
+    decision.add_argument("--reject-candidate", metavar="ID", help="Resume with the current recipe settings")
     inspect = commands.add_parser("inspect", help="View live layer comparisons from a training run")
     inspect.add_argument("--run", required=True, help="Run directory containing recipe_metrics.jsonl")
     inspect.add_argument("--port", type=int, default=8765)

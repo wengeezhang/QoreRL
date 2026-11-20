@@ -33,7 +33,7 @@ class WeightLoaderExtension:
                 raise RuntimeError(f"Incomplete vLLM refit: {sorted(missing)}")
             if installation is not None:
                 if installation.state.spec.uses_smoothquant:
-                    installation.state.install_scales(recipe_state["scales"])
+                    installation.state.install_smoothing_factors(recipe_state["scales"])
                 installation.refresh()
             torch.cuda.synchronize()
         except BaseException:
@@ -93,7 +93,7 @@ class VLLMRollout:
             timeout=self.cfg.rpc_timeout,
         )
         if self.cfg.recipe.uses_smoothquant and acknowledgements != [snapshot.policy_version.recipe_id]:
-            raise RuntimeError("vLLM worker failed to acknowledge the active SmoothQuant scale identity")
+            raise RuntimeError("vLLM worker failed to acknowledge the active SmoothQuant transform identity")
         self.policy_version = snapshot.policy_version
         return self.policy_version
 
