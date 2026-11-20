@@ -88,6 +88,8 @@ QoreRL 当前的原生实现采用同步 GRPO。**编排端安排工作，Ray wo
 
 ![同步 GRPO 系统架构。编排端协调 Ray learner 与 rollout worker，训练端更新并导出策略快照，采样端安装并确认版本后才能开始下一批。](docs/assets/framework-architecture.zh-CN.svg)
 
+想从设计追到代码，可以跟着一条回答走到优化器，再跟着一个权重走回 vLLM。[架构实现解读（中文）](code-walkthrough.md#zh-cn)
+
 ### 一批训练由谁负责？
 
 Rollout 为每道题生成一组回答。编排端核对策略版本与分组完整性，计算奖励和组内优势，再把训练批交给 learner。Learner 更新后导出权重和 recipe 状态。编排端把同一个快照的 Ray 对象引用交给所有 rollout 副本，收齐安装确认后再开始下一批。到达校准周期时，候选评估发生在这次常规权重发布之后。[同步训练主循环](qorerl/runtime/ray_runtime.py)

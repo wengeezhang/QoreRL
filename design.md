@@ -88,6 +88,8 @@ The current native runtime uses synchronous GRPO. **The driver schedules work, R
 
 ![The synchronous GRPO driver coordinates Ray learner and rollout workers. The learner exports a versioned snapshot. All rollout workers install and acknowledge it before the next batch.](docs/assets/framework-architecture.svg)
 
+Follow a recorded response into the optimizer and a weight snapshot back to vLLM in the [architecture code walkthrough](code-walkthrough.md).
+
 ### Who owns each part of a training batch?
 
 Rollout generates a group of responses for each prompt. The driver checks the policy version and group completeness, computes rewards and group-relative advantages, and sends the training batch to the learner. After updating, the learner exports the weights and recipe state. The driver passes a Ray object reference to the same snapshot to every rollout replica and waits for all installation acknowledgements before the next batch. When calibration is due, candidate evaluation follows this regular weight publication. [Synchronous GRPO training loop](qorerl/runtime/ray_runtime.py)
