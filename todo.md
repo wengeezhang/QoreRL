@@ -24,6 +24,11 @@ The [MXFP8 and Hadamard guide](docs/recipes/mxfp8-hadamard.md) describes the imp
 - [ ] Run operator probes and all three GRPO configurations on GPU. Verify nonzero updates, refit and resume, and compare the native quantizers.
 - [ ] For each recipe, publish its source, reproducible configuration, workload, numerical results, training quality, memory and end-to-end cost. Include failures and neutral results.
 - [x] Keep canonical weights, rebuild vLLM's rotated and quantized weights and kernel-layout caches after refit, and acknowledge a version only after successful installation. GPU execution checks are pending.
+- [ ] Reuse SmoothQuant's transformed and quantized training weights across microbatches within one optimizer step. Implementation is deferred until native correctness and profiling are established.
+  - Keep canonical model weights and FP32 optimizer master weights unchanged in meaning. Build `W_eff = W * S` and its quantized representations once while both `W` and `S` remain unchanged, then reuse them for subsequent microbatches. Inputs still require their own transform and quantization.
+  - Preserve autograd connectivity to canonical weights and the mapping `dW = dW_eff * S`. Cache numerical representations without reusing a backward graph that has already been freed.
+  - Invalidate on every actual optimizer update, smoothing-factor change, checkpoint restore or weight reload, and incompatible device, dtype or layout changes. Do not use only the published `weight_version`: one learner update can contain multiple optimizer steps.
+  - Compare cached and uncached outputs, input/weight gradients and parameter updates across gradient accumulation, multiple update epochs, factor refresh and resume. Measure weight transform/quantization calls, GPU time, peak memory and end-to-end training cost; fewer repeated operations alone do not establish a speedup.
 - [ ] Once measurements establish a benefit, optimize the FWHT CUDA kernel, repeated weight transforms, cache memory use and synchronization cost. Then expand to MoE and parallel execution.
 
 Acceptance requires reproducible BF16 and MXFP8 comparisons on the same workload and a way for users to confirm the configuration that ran. Each additional method and combination needs its own evaluation.
