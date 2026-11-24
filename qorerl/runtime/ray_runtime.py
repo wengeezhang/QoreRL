@@ -58,10 +58,10 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
         raise ValueError("Calibration decisions require --resume")
     review = read_review(resume, metadata, cfg, decision, candidate_id) if resume else None
     calibration = cfg.active_calibration
-    imported = None
+    offline_calibration_result = None
     if not resume and calibration and calibration.initial_artifact:
-        imported = json.loads(Path(calibration.initial_artifact).read_text())
-        if not isinstance(imported, dict):
+        offline_calibration_result = json.loads(Path(calibration.initial_artifact).read_text())
+        if not isinstance(offline_calibration_result, dict):
             raise ValueError("An initial recipe artifact must be a JSON object")
     directory = Path(output).resolve()
     directory.mkdir(parents=True, exist_ok=False)
@@ -129,9 +129,10 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
 
         event_log = directory / "calibration.jsonl"
         expected = ray.get(learner.current_policy.remote(), timeout=cfg.rpc_timeout) if calibration else None
-        if imported is not None:
+        if offline_calibration_result is not None:
             expected = ray.get(
-                learner.apply_candidate.remote(imported, initial=True), timeout=cfg.rpc_timeout
+                learner.apply_candidate.remote(offline_calibration_result, initial=True),
+                timeout=cfg.rpc_timeout,
             )
         policy_version = publish(expected)
         first_step = metadata["step"] if metadata else 0
@@ -152,7 +153,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                     "policy": asdict(policy_version),
                 },
             )
-        elif imported is not None:
+        elif offline_calibration_result is not None:
             append_json(
                 event_log,
                 {
