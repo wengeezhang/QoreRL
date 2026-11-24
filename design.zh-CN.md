@@ -75,7 +75,7 @@ SmoothQuant 给一个线性层的每个输入通道分配一个平滑因子，�
 
 假设第 7 层的原始权重 W 刚刚同步，用户随后接受了新的 S。下一次前向时，learner 会用新 S 计算 `X / S` 和 `W * S`。此时 vLLM 仍缓存着按**旧 S** 处理过的权重。即使 W 完全相同，采样端也需要拿到新 S 并重建缓存，才能与 learner 执行同一方案。这次发布后，权重代次保持不变，采样版本会随新的 S 更新。 [训练端适配](qorerl/recipes/megatron_mxfp8.py) · [采样端适配](qorerl/recipes/vllm_mxfp8.py)
 
-<details>
+<details open>
 <summary>查看动态 SmoothQuant 从校准到发布的完整流程图</summary>
 
 ![每批先采样、更新和发布权重。到达校准周期后发现异常、比较候选。接受变更后发布新的 S，等待全部 rollout 确认后继续采样。](docs/assets/smoothquant-calibration-flow.zh-CN.svg)

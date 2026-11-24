@@ -75,7 +75,7 @@ For a fixed run with offline smoothing factors, supply `initial_artifact` and se
 
 Suppose layer 7's weights `W` have just been synchronized, and the user then accepts new smoothing factors. On the next forward pass, the learner computes `X / S` and `W * S` with the new values. vLLM still has weights cached using the **old S**. Even though the underlying `W` is identical, rollout needs the new S to rebuild its cache and execute the same transform as the learner. This publication preserves the weight version and changes the effective policy version. [Learner adapter](qorerl/recipes/megatron_mxfp8.py) · [Rollout adapter](qorerl/recipes/vllm_mxfp8.py)
 
-<details>
+<details open>
 <summary>See the SmoothQuant calibration and publication workflow</summary>
 
 ![Each batch starts with rollout, training, and weight publication. At calibration time the learner compares candidate factors. After approval, both engines install the new factors and all rollout replicas acknowledge the version before sampling resumes.](docs/assets/smoothquant-calibration-flow.svg)
