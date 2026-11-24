@@ -4,9 +4,114 @@
 
 <a id="english"></a>
 
-QoreRL runs synchronous GRPO with a precision recipe shared by a learner and its rollout replicas. This report follows two objects through the code. A sampled response travels **from rollout to the learner**. A weight snapshot travels **from the learner back to every rollout replica**. Changing a recipe during training uses that same publication path. The driver decides when a batch may start, the Ray workers own the engine processes, and the engines implement the numerical operations.
+QoreRL runs synchronous GRPO with a precision recipe shared by a learner and its rollout replicas. Start with the two maps below: **what describes a recipe and its active state**, then **which component schedules, owns and executes the work**. The remaining sections follow a sampled response from rollout to the optimizer and a weight snapshot back to every rollout replica.
 
-## 1. From the command line to the first rollout
+[Configuration and state](#configuration-map) · [Execution responsibilities](#execution-map) · [Training and publication sequence](#trace) · [CPU review example](#cpu-run)
+
+<a id="configuration-map"></a>
+
+## 1. Configuration and active recipe state
+
+**`RecipeSpec` describes the chosen method and its boundaries. `RecipeState` stores the transforms that are active now.** The diagram shows configuration and state relationships; arrows are labeled by their role, rather than implying that every box is a class or every arrow is a method call.
+
+```mermaid
+flowchart TB
+    CFG["TrainConfig<br/>Configuration for one run"]
+    SPEC["RecipeSpec<br/>Method, precision and layer bounds"]
+    CAL["CalibrationConfig<br/>Schedule, criteria and approval"]
+    OBS["RecipeObservationConfig<br/>Probe frequency and budget"]
+    HANDLER["smoothquant module<br/>Prepare and apply candidates"]
+    STATE["RecipeState<br/>Active factors or fixed signs<br/>Targets and transform identity"]
+    PROBE["RecipeProbe<br/>Replay and comparison reports"]
+
+    CFG -->|recipe| SPEC
+    CFG -->|calibration| CAL
+    CFG -->|observation| OBS
+    SPEC -->|constrains| STATE
+    SPEC -.->|candidate_handler| HANDLER
+    CAL -->|evaluation options| HANDLER
+    HANDLER -->|apply after approval| STATE
+    OBS -->|configures| PROBE
+
+    classDef config fill:#eef4fa,stroke:#8ca6bf,color:#172b3a,stroke-width:1.3px,rx:8,ry:8;
+    classDef execution fill:#f6f3ec,stroke:#b8a783,color:#413722,stroke-width:1.3px,rx:8,ry:8;
+    classDef state fill:#e4f3ee,stroke:#458b79,color:#173b32,stroke-width:1.3px,rx:8,ry:8;
+    class CFG,SPEC,CAL,OBS config;
+    class HANDLER,PROBE execution;
+    class STATE state;
+```
+
+| Object | Responsibility | Where to read |
+| --- | --- | --- |
+| `TrainConfig` | Resolves the recipe, calibration and observation settings, and validates their combination with the engines. | [Training configuration](qorerl/training/config.py) |
+| `RecipeSpec` | Immutable method, precision, low-precision layer scope, initial transform scope and expansion permission. Selects the optional candidate handler. | [Recipe specification](qorerl/recipes/spec.py) |
+| `RecipeState` | Registered targets, fixed Hadamard signs or active SmoothQuant smoothing factors, and the resulting identity. Serializes transform state for publication and recovery. | [Runtime state](qorerl/recipes/state.py) |
+| `CalibrationConfig` | When to evaluate, how much input to collect, discovery and acceptance criteria, and manual or automatic approval. The driver uses the schedule and approval settings; the recipe uses the fitting and evaluation settings. | [Calibration configuration](qorerl/recipes/calibration.py) |
+| `RecipeObservationConfig` / `RecipeProbe` | Configure and execute Recipe Insights comparisons. The probe writes measurements; it does not install candidates. | [Probe configuration](qorerl/observability/config.py) · [Probe](qorerl/observability/probe.py) |
+
+For example, the spec can select low-precision layers `[7, 15, 20, 25]`, enable SmoothQuant initially on `[7, 15, 20]`, and permit expansion. A later approved candidate adds smoothing factors for layer 25 to the **state**. The **spec** stays unchanged: layer 25 was already inside the permitted low-precision scope. Layer 23 remains outside it.
+
+`candidate_handler` is an optional module interface, currently implemented by **SmoothQuant**. Its preparation returns a proposal and evidence without changing the active state. After approval, the learner calls its application function. **Fixed Hadamard intentionally has no candidate handler**: `RecipeState.add_target()` creates its signs from the configured seed and layer index, and `PreparedHadamard` executes the fixed rotation. It does not run periodic sign search or learn the rotation. [Candidate dispatch](qorerl/recipes/spec.py#L49) · [SmoothQuant handler](qorerl/recipes/smoothquant.py#L251) · [Hadamard execution](qorerl/recipes/hadamard.py)
+
+The observation branch is separate from candidate calibration. Recipe Insights currently compares supported fixed MXFP8 methods. SmoothQuant uses the calibration path for evidence and proposals. `RecipeState` holds transform data and small transform caches; model parameters and optimizer state belong to the learner, and rollout's packed weight cache belongs to its installation.
+
+<a id="execution-map"></a>
+
+## 2. From orchestration to numerical execution
+
+Read down each column: **schedule work → receive remote calls → execute the model → adapt selected projections → read transform state**. Solid arrows denote object ownership. Dashed arrows denote calls through a worker API. This is the native Megatron/vLLM path; only one rollout replica is drawn.
+
+```mermaid
+flowchart TB
+    D["run_sync_grpo() · driver<br/>Schedule, review, checkpoint and publish"]
+
+    LW["RayLearnerWorker<br/>Receives remote calls"]
+    LE["MegatronLearner<br/>Model, optimizer and snapshots"]
+    LI["MegatronRecipeInstallation<br/>Selected projection forward"]
+    LS["RecipeState<br/>Training transforms"]
+    LW --> LE
+    LE --> LI
+    LI --> LS
+
+    RW["RayRolloutWorker<br/>Receives remote calls"]
+    RE["VLLMRollout<br/>Generation and weight installation"]
+    RI["VLLMRecipeInstallation<br/>Projection and weight cache"]
+    RS["RecipeState<br/>Inference transforms"]
+    RW --> RE
+    RE -.->|vLLM worker API| RI
+    RI --> RS
+
+    D -.->|Ray remote calls| LW
+    D -.->|Ray remote calls| RW
+
+    classDef control fill:#eef4fa,stroke:#8ca6bf,color:#172b3a,stroke-width:1.3px,rx:8,ry:8;
+    classDef execution fill:#f6f3ec,stroke:#b8a783,color:#413722,stroke-width:1.3px,rx:8,ry:8;
+    classDef state fill:#e4f3ee,stroke:#458b79,color:#173b32,stroke-width:1.3px,rx:8,ry:8;
+    class D,LW,RW control;
+    class LE,RE,LI,RI execution;
+    class LS,RS state;
+```
+
+The driver is a **function**, and the SmoothQuant handler above is a **module**. `LearnerEngine` and `RolloutEngine` are **protocols** describing the methods the workers can call. The concrete `MegatronLearner` inherits the shared optimizer and candidate-dispatch logic from `SingleRankGRPOLearner`. The diagram follows runtime ownership, not class inheritance. [Driver](qorerl/runtime/ray_runtime.py#L33) · [Ray wrappers](qorerl/runtime/ray_workers.py) · [Protocols](qorerl/engines/base.py) · [Shared learner](qorerl/engines/single_rank_learner.py#L77)
+
+There are two worker layers on the rollout side. QoreRL's `RayRolloutWorker` holds the `VLLMRollout` engine. The executable inference model and its `VLLMRecipeInstallation` live inside vLLM's `QoreRLRecipeWorker`. The engine reaches that installation through vLLM's worker API; the dashed edge to the installation abbreviates this internal boundary. [vLLM engine](qorerl/engines/vllm.py#L54) · [Inner worker](qorerl/engines/vllm_worker.py#L17)
+
+**The two `RecipeState` boxes are separate instances.** A `WeightSnapshot` transports canonical weights and serialized recipe state through the driver's publication barrier. Each rollout installation validates and installs the state, rebuilds its derived weights, and acknowledges the version. The learner also exposes its installation's state through `recipe_state`; that reference is an alias within the learner. [Learner installation](qorerl/engines/megatron.py) · [Rollout installation](qorerl/recipes/vllm_mxfp8.py#L193)
+
+The objects crossing these boundaries have different jobs:
+
+| Data object | Route and meaning |
+| --- | --- |
+| `Prompt` | Driver → rollout: one task's token IDs, group ID and reference answer. |
+| `Trajectory` | Rollout → driver: one sampled response, behavior log probabilities and the policy that generated it. |
+| `TrainingBatch` | Driver → learner: ordered trajectories, rewards, advantages and their policy version. |
+| `PaddedMicrobatch` | Within the learner: device tensors with causal labels, response masks and loss inputs. |
+| `WeightSnapshot` | Learner → every rollout replica: canonical weights, model identity, policy version and serialized recipe state. |
+| `PolicyVersion` | Associates samples and publications with both a weight version and an active recipe identity. |
+
+[Data contracts](qorerl/training/contracts.py) · [Microbatch construction](qorerl/training/batching.py)
+
+## 3. From the command line to the first rollout
 
 `qorerl train --config … --out …` enters `qorerl.cli.main()`. It loads a `TrainConfig` and calls `run_sync_grpo()`. The config resolves the recipe name, base precision, selected projections and calibration options. On the native path the driver resolves the model revision before starting either engine. Look here first if a run uses unexpected defaults. [CLI](qorerl/cli.py#L8) · [Training configuration](qorerl/training/config.py) · [Recipe resolution](qorerl/recipes/spec.py#L127)
 
@@ -43,7 +148,7 @@ sequenceDiagram
 
 In manual mode the gap between proposal and approval can span two invocations of the CLI. The checkpoint joins the two halves. [Calibration and review in the driver](qorerl/runtime/ray_runtime.py#L231)
 
-## 2. Follow one response into the optimizer
+## 4. Follow one response into the optimizer
 
 | Stage | What happens to one response | Code to open |
 | --- | --- | --- |
@@ -54,7 +159,7 @@ In manual mode the gap between proposal and approval can span two invocations of
 
 Two counters explain the scheduling. **Weight version** advances once per consumed batch. **Optimizer steps** counts actual AdamW calls. An all-zero-advantage batch advances the version and skips AdamW. A batch with multiple active update epochs can advance the optimizer counter several times. The driver checks whether that counter crossed a calibration interval at the batch boundary. [Version contract](qorerl/training/contracts.py#L15) · [Interval check](qorerl/runtime/calibration.py#L66)
 
-## 3. Follow one projection from Megatron to vLLM
+## 5. Follow one projection from Megatron to vLLM
 
 Take decoder layer 25 in the supplied Qwen3 configuration. Megatron calls its MLP down projection `decoder.layers[25].mlp.linear_fc2`. The name that travels between engines is `model.layers.25.mlp.down_proj.weight`. The same canonical parameter serves training, export and recovery. [Example configuration](configs/grpo_dynamic_smoothquant.json) · [Megatron installation](qorerl/recipes/megatron_mxfp8.py#L57) · [Bridge export](qorerl/engines/megatron.py#L99)
 
@@ -64,7 +169,9 @@ Take decoder layer 25 in the supplied Qwen3 configuration. Megatron calls its ML
 
 The native learner calls NVIDIA Transformer Engine for both MXFP8 and NVFP4. On the rollout side MXFP8 uses vLLM’s FlashInfer CUTLASS linear kernel and CuTe-DSL quantizer. NVFP4 uses the Transformer Engine packer and forward GEMM. [Learner backend selection](qorerl/recipes/te_block_linear.py#L35) · [Rollout backends](qorerl/recipes/vllm_mxfp8.py#L23)
 
-## 4. What changes when a recipe can adapt?
+**Cache ownership matters here.** Rollout already reuses transformed and packed weights after publication. Training currently transforms and quantizes weights on each projection forward. Reusing those representations across microbatches within one optimizer step is recorded in the [roadmap](todo.md); it is not implemented. Smoothing factors and Hadamard signs cached in `RecipeState` do not provide that weight cache.
+
+## 6. What changes when a recipe can adapt?
 
 In the example, layers **7, 15, 20 and 25** start with MXFP8 down projections. Layers **7, 15 and 20** also start with SmoothQuant. Layer 25 is eligible to gain that transform. Layer 23 stays outside this recipe's low-precision scope throughout the run. `RecipeSpec` defines these scopes. `RecipeState` holds the transforms currently installed. [Scope selection](qorerl/recipes/spec.py#L92) · [Installed state](qorerl/recipes/state.py#L61)
 
@@ -80,7 +187,7 @@ A user with known targets can bypass outlier screening for refreshes on active l
 
 <a id="cpu-run"></a>
 
-## 5. Trace an actual review on CPU
+## 7. Trace an actual review on CPU
 
 From the repository root, the following config runs one learner and two rollout replicas. Use fresh output directories. The first command prints the checkpoint path and candidate ID used by the second command. [CPU config](configs/grpo_cpu_smoothquant.json) · [CPU engines](qorerl/engines/torch_test.py) · [Workflow tests](tests/test_calibration_workflow.py)
 
@@ -105,24 +212,124 @@ To extend the code, start from the ownership of the change. A new numerical meth
 
 <a id="zh-cn"></a>
 
-## 中文解读 · 从一条回答追到下一次策略发布
+## 中文解读 · 架构对象与训练调用链
 
-可以从两个方向读 QoreRL。**第一条线是数据。** Rollout 生成一道题的多份回答，learner 用这些回答更新模型。**第二条线是策略。** Learner 把新权重和生效的量化方案一起交给 rollout，所有副本确认后才开始下一批。训练期间更换 SmoothQuant 的缩放因子，也要走第二条线。下面沿着这两条线追到具体的 Python 对象和函数。[上方时序图](#trace) · [设计文档](design.zh-CN.md)
+先看两张图：**哪些对象描述 recipe 与当前状态**，以及**谁编排、谁持有、谁执行**。然后沿着两个方向追代码：一条回答从 rollout 进入优化器；一份权重快照从 learner 发布到每个 rollout 副本。训练期间更换 SmoothQuant 的平滑系数，也要走同一条发布链路。
 
-### 1. 一条命令怎样启动两个引擎？
+[配置与状态关系](#configuration-map-zh) · [执行职责关系](#execution-map-zh) · [训练与发布时序](#trace) · [设计文档](design.zh-CN.md)
+
+<a id="configuration-map-zh"></a>
+
+### 1. 配置描述什么，运行状态保存什么？
+
+**`RecipeSpec` 定义选了什么方法，以及允许在哪个范围内运行；`RecipeState` 保存此刻真正生效的变换。** 下图是配置与状态的关系图，箭头上的文字表示具体关系；不是每个框都是类，也不是每条箭头都是一次方法调用。
+
+```mermaid
+flowchart TB
+    CFG["TrainConfig<br/>一次训练的总配置"]
+    SPEC["RecipeSpec<br/>方法、精度与层范围"]
+    CAL["CalibrationConfig<br/>周期、判定条件与批准方式"]
+    OBS["RecipeObservationConfig<br/>探针频率与采样预算"]
+    HANDLER["smoothquant 模块<br/>准备与应用候选"]
+    STATE["RecipeState<br/>生效的平滑系数或固定符号<br/>目标层与变换身份"]
+    PROBE["RecipeProbe<br/>回放并输出比较报告"]
+
+    CFG -->|recipe| SPEC
+    CFG -->|calibration| CAL
+    CFG -->|observation| OBS
+    SPEC -->|约束| STATE
+    SPEC -.->|candidate_handler| HANDLER
+    CAL -->|提供评估参数| HANDLER
+    HANDLER -->|批准后应用| STATE
+    OBS -->|配置| PROBE
+
+    classDef config fill:#eef4fa,stroke:#8ca6bf,color:#172b3a,stroke-width:1.3px,rx:8,ry:8;
+    classDef execution fill:#f6f3ec,stroke:#b8a783,color:#413722,stroke-width:1.3px,rx:8,ry:8;
+    classDef state fill:#e4f3ee,stroke:#458b79,color:#173b32,stroke-width:1.3px,rx:8,ry:8;
+    class CFG,SPEC,CAL,OBS config;
+    class HANDLER,PROBE execution;
+    class STATE state;
+```
+
+| 对象 | 负责回答的问题 | 对应代码 |
+| --- | --- | --- |
+| `TrainConfig` | 一次训练如何配置？解析 recipe、校准和观测配置，并检查它们与引擎的组合是否合法。 | [训练配置](qorerl/training/config.py) |
+| `RecipeSpec` | 选什么方法、什么精度、哪些低精度层、哪些初始变换层，是否允许扩展？规格不可变，并选择可选的候选处理模块。 | [Recipe 规格](qorerl/recipes/spec.py) |
+| `RecipeState` | 此刻哪些层注册了，固定 Hadamard 的符号是什么，SmoothQuant 的平滑系数是什么，对应哪个身份？负责变换状态的序列化与恢复。 | [运行状态](qorerl/recipes/state.py) |
+| `CalibrationConfig` | 多久评估、采多少输入、怎样筛选与验收、谁批准？Driver 使用周期与批准配置，recipe 使用拟合与评估参数。 | [校准配置](qorerl/recipes/calibration.py) |
+| `RecipeObservationConfig` / `RecipeProbe` | 如何配置并执行 Recipe Insights 的对比观测？探针产出测量结果，不负责安装候选。 | [探针配置](qorerl/observability/config.py) · [探针实现](qorerl/observability/probe.py) |
+
+例如，spec 指定 `[7, 15, 20, 25]` 使用低精度，初始只在 `[7, 15, 20]` 叠加 SmoothQuant，并允许扩展。候选获批后，第 25 层的平滑系数进入 **state**。**Spec 不变**，因为第 25 层本来就在授权的低精度范围内；第 23 层始终不在其中。
+
+`candidate_handler` 是可选的模块接口，目前由 **SmoothQuant** 实现。准备阶段返回提案和证据，不修改生效状态；批准后，learner 再调用应用入口。**固定 Hadamard 有意不提供候选处理模块**：`RecipeState.add_target()` 根据 seed 与层号生成固定符号，`PreparedHadamard` 执行旋转。它不会周期性搜索符号，也不学习旋转参数。[选择处理模块](qorerl/recipes/spec.py#L49) · [SmoothQuant 处理模块](qorerl/recipes/smoothquant.py#L251) · [Hadamard 执行](qorerl/recipes/hadamard.py)
+
+图中的观测分支与候选校准是分开的。目前 Recipe Insights 对比支持的固定 MXFP8 方法，SmoothQuant 则通过校准链路生成证据与候选。`RecipeState` 保存变换数据和少量变换缓存；模型参数、优化器状态由 learner 管理，rollout 的打包权重缓存由其 installation 管理。
+
+<a id="execution-map-zh"></a>
+
+### 2. 从编排到计算，谁负责哪一层？
+
+沿每一列向下读：**安排工作 → 接收远程调用 → 执行模型 → 接入所选投影 → 读取变换状态**。实线表示对象持有关系，虚线表示经过 worker 接口的调用。这里展示原生 Megatron/vLLM 路径，只画一个 rollout 副本。
+
+```mermaid
+flowchart TB
+    D["run_sync_grpo() · driver<br/>编排、审核、保存与发布"]
+
+    LW["RayLearnerWorker<br/>接收远程调用"]
+    LE["MegatronLearner<br/>模型、优化器与快照导出"]
+    LI["MegatronRecipeInstallation<br/>接管所选投影的 forward"]
+    LS["RecipeState<br/>训练侧的变换状态实例"]
+    LW --> LE
+    LE --> LI
+    LI --> LS
+
+    RW["RayRolloutWorker<br/>接收远程调用"]
+    RE["VLLMRollout<br/>生成回答与安装权重"]
+    RI["VLLMRecipeInstallation<br/>投影执行与权重缓存"]
+    RS["RecipeState<br/>采样侧的变换状态实例"]
+    RW --> RE
+    RE -.->|vLLM worker 接口| RI
+    RI --> RS
+
+    D -.->|Ray 远程调用| LW
+    D -.->|Ray 远程调用| RW
+
+    classDef control fill:#eef4fa,stroke:#8ca6bf,color:#172b3a,stroke-width:1.3px,rx:8,ry:8;
+    classDef execution fill:#f6f3ec,stroke:#b8a783,color:#413722,stroke-width:1.3px,rx:8,ry:8;
+    classDef state fill:#e4f3ee,stroke:#458b79,color:#173b32,stroke-width:1.3px,rx:8,ry:8;
+    class D,LW,RW control;
+    class LE,RE,LI,RI execution;
+    class LS,RS state;
+```
+
+Driver 是一个**函数**，上图的 SmoothQuant handler 是一个**模块**。`LearnerEngine` 和 `RolloutEngine` 是约定 worker 能调用哪些方法的 **Protocol**；具体的 `MegatronLearner` 则继承 `SingleRankGRPOLearner`，复用优化器和候选分派逻辑。这张图表达运行时的持有与调用关系，类继承另有其作用。[编排入口](qorerl/runtime/ray_runtime.py#L33) · [Ray 包装层](qorerl/runtime/ray_workers.py) · [协议](qorerl/engines/base.py) · [Learner 公共实现](qorerl/engines/single_rank_learner.py#L77)
+
+采样侧有两层 worker。QoreRL 的 `RayRolloutWorker` 持有 `VLLMRollout` 引擎；真正的推理模型与 `VLLMRecipeInstallation` 在 vLLM 的 `QoreRLRecipeWorker` 中。引擎通过 vLLM worker 接口访问它，图中用一条虚线简写这个内部边界。[vLLM 引擎](qorerl/engines/vllm.py#L54) · [内部 worker](qorerl/engines/vllm_worker.py#L17)
+
+**两端的 `RecipeState` 是两个独立实例。** `WeightSnapshot` 带上规范权重与序列化的 recipe 状态，经 driver 发布给各副本。Rollout 校验并安装状态、重建派生权重，最后确认版本。Learner 内的 `recipe_state` 则是其 installation 中 state 的同一对象引用。[Learner 接入](qorerl/engines/megatron.py) · [Rollout 接入](qorerl/recipes/vllm_mxfp8.py#L193)
+
+穿过这些边界的数据对象各自负责一件事：
+
+| 数据对象 | 流向与含义 |
+| --- | --- |
+| `Prompt` | Driver → rollout：题目的 token ID、组号与参考答案。 |
+| `Trajectory` | Rollout → driver：一个回答、当时的采样概率，以及生成它的策略身份。 |
+| `TrainingBatch` | Driver → learner：整理好的轨迹、奖励、优势值与策略版本。 |
+| `PaddedMicrobatch` | Learner 内部：放到设备上的张量，包含因果对齐的标签、回答 mask 与 loss 输入。 |
+| `WeightSnapshot` | Learner → 所有 rollout 副本：规范权重、模型标识、策略版本与序列化的 recipe 状态。 |
+| `PolicyVersion` | 将样本和发布绑定到权重版本与当前 recipe 身份。 |
+
+[数据协议](qorerl/training/contracts.py) · [Microbatch 构造](qorerl/training/batching.py)
+
+### 3. 一条命令怎样启动两个引擎？
 
 执行 `qorerl train --config … --out …` 时，入口是 `qorerl.cli.main()`。它用 `TrainConfig.load()` 读取配置，然后调用 `run_sync_grpo()`。配置中的 recipe 名称、基础精度和层号会被解析成 `RecipeSpec`。原生 GPU 路径还会在两个引擎启动前解析模型 revision，让双方加载同一个模型版本。[CLI 入口](qorerl/cli.py#L8) · [训练配置](qorerl/training/config.py) · [Recipe 解析](qorerl/recipes/spec.py#L127)
 
-| 谁 | 在代码里是什么 | 一次训练中具体负责什么 |
-| --- | --- | --- |
-| 编排端 | `run_sync_grpo()` 所在的 driver 进程 | 把题交给 rollout，等回答收齐后安排训练，收到权重发布确认才发下一批题。 |
-| 远程调用的接收方 | 一个 `RayLearnerWorker` 和一个或多个 `RayRolloutWorker` | 各自长期持有引擎。调用 `learner.update.remote(batch)` 时，由 learner 所在进程调用本地引擎的 `update(batch)`。 |
-| 执行计算的后端 | `MegatronLearner`、`VLLMRollout`，或 CPU 示例中的 `torch_test` | Learner 负责前向、反向和参数更新。Rollout 负责安装权重、生成回答、返回采样概率。 |
-| 两端共享的规则 | `training/` 中的数据协议、奖励和目标函数，以及 `recipes/` 中的数值实现 | 前者规定一条回答如何进入 GRPO。后者规定某层怎样算，以及哪些数值状态要随权重一起发布。 |
+Driver 创建一个 `RayLearnerWorker` 和配置数量的 `RayRolloutWorker`，由引擎工厂分别构造长期持有的后端。原生路径使用 Megatron 与 vLLM，CPU 示例两端都使用 `torch_test`，但经过同一套 Ray 远程调用。启动时先发布初始策略，收齐所有副本的安装确认，才交出第一批题。
 
 阅读时可以先打开 driver 的 `publish()` 和主循环，再顺着其中的一次远程调用看 worker 和 engine。这样能分清「谁决定现在开始更新」和「谁真的执行了反向」。[编排入口](qorerl/runtime/ray_runtime.py#L33) · [Ray worker](qorerl/runtime/ray_workers.py) · [引擎工厂](qorerl/engines/factory.py) · [引擎接口](qorerl/engines/base.py)
 
-### 2. 一道题怎样变成一次参数更新？
+### 4. 一道题怎样变成一次参数更新？
 
 1. **采样时就记下分母。** Driver 把同一道题的整组采样交给同一个 rollout 副本。vLLM 为这道题生成 `group_size` 个回答，每个回答对应一个 `Trajectory`。里面有题目和回答的 token ID、每个生成 token 当时的 log probability、组号、组内编号，以及这条回答来自哪一版策略。训练端后面计算 ratio 时就能取回这一项。[分配任务](qorerl/runtime/ray_runtime.py#L178) · [vLLM 组装回答](qorerl/engines/vllm.py#L106) · [Trajectory](qorerl/training/contracts.py#L45)
 2. **回答收齐后才算优势值。** Driver 按 `(group_id, sample_id)` 整理回答，检查题目 token 与版本，遇到重复、缺失或过期样本会报错。内置任务用答案精确匹配打分，每个回答的优势值等于「该回答得分减组内平均」除以「组内总体标准差加 `1e-6`」。轨迹、奖励、优势和版本一起组成 `TrainingBatch`。[轨迹校验](qorerl/training/contracts.py#L87) · [判分](qorerl/training/tasks.py) · [组内优势](qorerl/training/objective.py#L11)
@@ -131,7 +338,7 @@ To extend the code, start from the ownership of the change. A new numerical meth
 
 因此，日志里有两个进度。**每消费一批，`weight_version` 增加 1。每真正执行一次 AdamW，`optimizer_steps` 才增加 1。** 一批可以跳过优化，也可以因多个更新 epoch 而优化多次。「每 20 步校准」看后一个计数。Driver 在批次结束时检查是否跨过周期边界。[策略版本](qorerl/training/contracts.py#L15) · [周期判定](qorerl/runtime/calibration.py#L66)
 
-### 3. 跟着第 25 层的一个权重走到 vLLM
+### 5. 跟着第 25 层的一个权重走到 vLLM
 
 以配置中的 Qwen3 为例。Megatron 中的对象是 `decoder.layers[25].mlp.linear_fc2`。导出后它的权重名是 `model.layers.25.mlp.down_proj.weight`。沿着这个名字读代码，可以看到 QoreRL 如何让训练和采样执行同一份 recipe。[原生示例配置](configs/grpo_dynamic_smoothquant.json) · [Megatron 接入](qorerl/engines/megatron.py#L18)
 
@@ -141,7 +348,9 @@ To extend the code, start from the ownership of the change. A new numerical meth
 
 原生 learner 的 MXFP8 和 NVFP4 都调用 NVIDIA Transformer Engine。Rollout 侧分两条路径。MXFP8 使用 vLLM 的 FlashInfer CUTLASS 线性层 kernel 和 CuTe-DSL 量化器，NVFP4 使用 Transformer Engine 的权重打包和前向 GEMM。[Learner 后端选择](qorerl/recipes/te_block_linear.py#L35) · [Rollout 后端选择](qorerl/recipes/vllm_mxfp8.py#L23)
 
-### 4. 在主循环的什么位置，recipe 能发生变化？
+**这里还要区分缓存归谁管理。** Rollout 已经在发布后复用变换、打包好的权重；训练端目前每次投影前向都会重新变换并量化权重。同一次 optimizer step 内跨 microbatch 复用这些结果，已经记入 [TODO](todo.md)，尚未实现。`RecipeState` 中平滑系数与 Hadamard 符号的缓存，并不等于这份权重缓存。
+
+### 6. 在主循环的什么位置，recipe 能发生变化？
 
 继续看第 25 层。示例中 **7、15、20、25 四层**的下投影从启动时就使用 MXFP8，只有 **7、15、20 三层**初始叠加 SmoothQuant。第 25 层可以在后续获得 S。第 23 层处于用户授权的低精度范围之外。`RecipeSpec` 定义允许的范围，`RecipeState` 保存此刻实际生效的状态。[范围选择](qorerl/recipes/spec.py#L92) · [生效状态](qorerl/recipes/state.py#L61)
 
@@ -158,7 +367,7 @@ To extend the code, start from the ownership of the change. A new numerical meth
 
 另外还有独立的 **Recipe Insights**。在支持的直接 MXFP8 和固定 Hadamard MXFP8 配置中，它在第一个 microbatch 捕获变换前的 X 和 W，在权重更新前，用相同操作数比较 BF16、直接 MXFP8、MXFP8 加固定 Hadamard，写入 `recipe_metrics.jsonl`。运行中的逐层图和导出的 HTML 从这里读数据。校准发生在常规发布之后，可以提出变更。Insights 给出的则是单个算子的误差与耗时。端到端训练速度、奖励和收敛仍要单独测量。[观测探针](qorerl/observability/probe.py#L138) · [图表与指标](docs/recipe-insights.zh-CN.md)
 
-### 5. 用一份运行记录对照源码
+### 7. 用一份运行记录对照源码
 
 用[上面的两条 CPU 命令](#cpu-run)可以经历一次「暂停审核 → 接受 → 下一批生效」。CPU 配置含一个 learner、两个 rollout 副本，每批 4 道题、每题 8 个回答。它让三层一开始都带 S，用于实际验证**刷新已有 S**。上文 Qwen3 的第 25 层则展示**首次叠加 SmoothQuant**。[CPU 配置](configs/grpo_cpu_smoothquant.json) · [CPU 测试引擎](qorerl/engines/torch_test.py) · [工作流测试](tests/test_calibration_workflow.py)
 
