@@ -12,6 +12,17 @@ from qorerl.training.config import TrainConfig
 from qorerl.training.contracts import PolicyVersion, Prompt, WeightSnapshot
 
 
+@pytest.mark.parametrize("placement,budget", [("separate", 0.7), ("collocate", 0.2)])
+def test_vllm_receives_resolved_memory_budget(monkeypatch, placement, budget):
+    calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(LLM=lambda **kw: calls.append(kw)))
+    VLLMRollout(TrainConfig(recipe_id="bf16-baseline-v1", worker_placement=placement))
+    assert calls[0]["gpu_memory_utilization"] == budget
+    assert calls[0]["distributed_executor_backend"] == "uni"
+    assert calls[0]["enforce_eager"] is True
+
+
 def test_megatron_output_keeps_batch_sequence_and_removes_vocab_padding():
     learner = MegatronLearner.__new__(MegatronLearner)
     learner.vocab_size = 10

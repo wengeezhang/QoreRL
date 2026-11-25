@@ -115,7 +115,9 @@ The objects crossing these boundaries have different jobs:
 
 `qorerl train --config … --out …` enters `qorerl.cli.main()`. It loads a `TrainConfig` and calls `run_sync_grpo()`. The config resolves the recipe name, base precision, selected projections and calibration options. On the native path the driver resolves the model revision before starting either engine. Look here first if a run uses unexpected defaults. [CLI](qorerl/cli.py#L8) · [Training configuration](qorerl/training/config.py) · [Recipe resolution](qorerl/recipes/spec.py#L127)
 
-The driver creates one `RayLearnerWorker` and a configured number of `RayRolloutWorker` instances. Each worker owns a long-lived engine created by the backend factory. On the native path the learner owns Megatron and each rollout worker owns vLLM. The CPU example selects `torch_test` on both sides and exercises the same Ray remote calls. At startup the driver publishes the initial policy and waits for installation acknowledgements before handing out prompts. [Driver](qorerl/runtime/ray_runtime.py#L33) · [Worker wrappers](qorerl/runtime/ray_workers.py) · [Factory](qorerl/engines/factory.py) · [Engine interfaces](qorerl/engines/base.py)
+The driver creates one `RayLearnerWorker` and a configured number of `RayRolloutWorker` instances. Each worker owns a long-lived engine created by the backend factory. On the native path the learner owns Megatron and each rollout worker owns vLLM. The CPU example selects `torch_test` on both sides and exercises the same Ray remote calls. At startup the driver publishes the initial policy and waits for installation acknowledgements before handing out prompts. [Driver](qorerl/runtime/ray_runtime.py#L34) · [Worker wrappers](qorerl/runtime/ray_workers.py) · [Factory](qorerl/engines/factory.py) · [Engine interfaces](qorerl/engines/base.py)
+
+`WorkerPlacement` determines where these processes run. The default `separate` mode assigns each worker its own GPU; `collocate` puts one learner and one rollout worker in the same placement bundle on one GPU. They keep their own engines and memory, and the synchronous driver alternates their work. The learner finishes loading or restoring before vLLM profiles memory. This physical placement does not change the ownership shown above or the recipe approval/publication flow. [Placement code](qorerl/runtime/placement.py) · [Single-GPU configuration and memory budget](docs/ray-grpo.md#single-gpu-collocation)
 
 <a id="trace"></a>
 
@@ -326,6 +328,8 @@ Driver 是一个**函数**，上图的 SmoothQuant handler 是一个**模块**�
 执行 `qorerl train --config … --out …` 时，入口是 `qorerl.cli.main()`。它用 `TrainConfig.load()` 读取配置，然后调用 `run_sync_grpo()`。配置中的 recipe 名称、基础精度和层号会被解析成 `RecipeSpec`。原生 GPU 路径还会在两个引擎启动前解析模型 revision，让双方加载同一个模型版本。[CLI 入口](qorerl/cli.py#L8) · [训练配置](qorerl/training/config.py) · [Recipe 解析](qorerl/recipes/spec.py#L127)
 
 Driver 创建一个 `RayLearnerWorker` 和配置数量的 `RayRolloutWorker`，由引擎工厂分别构造长期持有的后端。原生路径使用 Megatron 与 vLLM，CPU 示例两端都使用 `torch_test`，但经过同一套 Ray 远程调用。启动时先发布初始策略，收齐所有副本的安装确认，才交出第一批题。
+
+`WorkerPlacement` 决定这些进程部署在哪里。默认 `separate` 为每个 worker 分配独立 GPU；`collocate` 将一个 learner 和一个 rollout worker 放在同一 placement bundle、同一张 GPU 上。两端仍各自持有引擎与显存，由同步 driver 交替安排计算。Learner 完成加载或恢复后，vLLM 才开始测算显存。部署方式不改变上图的职责归属，也不改变 recipe 的审核与发布流程。[部署代码](qorerl/runtime/placement.py) · [单卡配置与显存预算](docs/ray-grpo.zh-CN.md#single-gpu-collocation)
 
 阅读时可以先打开 driver 的 `publish()` 和主循环，再顺着其中的一次远程调用看 worker 和 engine。这样能分清「谁决定现在开始更新」和「谁真的执行了反向」。[编排入口](qorerl/runtime/ray_runtime.py#L33) · [Ray worker](qorerl/runtime/ray_workers.py) · [引擎工厂](qorerl/engines/factory.py) · [引擎接口](qorerl/engines/base.py)
 

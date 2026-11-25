@@ -8,7 +8,7 @@
 
 ## 1. 一次训练怎么走
 
-默认原生场景是 `Qwen/Qwen3-0.6B` 的整数加法。每题生成 4 个答案，判断是否与整数答案完全匹配，正确为 1，否则为 0。模型使用非 thinking 模板，要求只回答整数。默认一个 batch 有 4 道题、16 个回答。
+默认原生场景是 `Qwen/Qwen3-0.6B` 的整数加法。每题生成 4 个答案，判断是否与整数答案完全匹配，正确为 1，否则为 0。模型使用非 thinking 模板，要求只回答整数。默认一个 batch 有 4 道题、16 个回答。下图展示默认的 `worker_placement: "separate"`；[单卡共置](#single-gpu-collocation) 保持同样的 worker 和发布边界。
 
 ```text
 driver / coordinator：不执行模型 forward，不直接取得完整权重
@@ -82,7 +82,7 @@ CPU 配置启动 1 个 learner 和 2 个 rollout actor，使用小型 GRU 模型
 results/ray-local/
   config.json                 解析后的配置和模型 revision
   recipe.json                 解析后的数值规格与身份
-  workers.json                driver / actors 的 PID 与 Ray node ID
+  workers.json                部署方式、进程 PID、Ray node 与分配的 GPU ID
   metrics.jsonl               loss、reward、ratio、clip、梯度范数和各阶段耗时
   trajectories.jsonl          每条回答的 token / behavior log-prob / reward / advantage / 版本
   checkpoints/step-000000/    采样前的初始安全边界
@@ -109,7 +109,7 @@ uv run qorerl train \
 
 恢复时新建 actor，加载 learner 的完整训练状态，重新导出并同步权重，再生成新轨迹。续训输出写到新目录，原实验不覆盖。
 
-续训时可以改变总步数、checkpoint 频率、RPC timeout、worker 的 runtime environment 和观测配置。学习率、batch、模型版本和 recipe 身份等训练语义须与检查点一致。若检查点绑定了待审 SmoothQuant 提案，用户可以在续训时接受或拒绝这次缩放变更。详见[人工确认示例](recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)。 CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
+续训时可以改变总步数、checkpoint 频率、RPC timeout、worker 的 runtime environment、部署方式、vLLM 显存预算和观测配置。学习率、batch、模型版本和 recipe 身份等训练语义须与检查点一致。若检查点绑定了待审 SmoothQuant 提案，用户可以在续训时接受或拒绝这次缩放变更。详见[人工确认示例](recipes/dynamic-smoothquant.zh-CN.md#在-cpu-上走完一次人工确认)。 CPU 测试检查连续训练与中断续训的最终参数和 optimizer states 逐值一致；GPU 是否能逐值复现需另外测。
 
 MXFP8 recipe 的同步和恢复会另外核对实际 target 形状和固定 signs，再重建 rollout 派生缓存。参数与 optimizer 保持原始坐标系。首组 recipe 的执行条件与对照命令见 [recipe 文档](recipes/mxfp8-hadamard.zh-CN.md)。
 
@@ -139,7 +139,46 @@ qorerl train --config configs/grpo_megatron_vllm.json --out results/native-basel
 
 不要把 CPU 快速开始的 `uv sync` 当成 Megatron/vLLM CUDA 栈安装器。它不会替你安装 native engines，且同步环境可能移除未在项目锁文件声明的已有包。
 
-如果两端依赖冲突，可分别创建环境，并通过 `learner_runtime_env` / `rollout_runtime_env` 传入 Ray 支持的 runtime-env 设置（例如各自的 `py_executable`）。各节点需有相同的 QoreRL 代码与兼容的 Ray/Python 版本；不同 Python 环境的 native 接入同样属于待验证项。首期建议先在一台双 GPU 机器验证，再扩大集群。
+如果两端依赖冲突，可分别创建环境，并通过 `learner_runtime_env` / `rollout_runtime_env` 传入 Ray 支持的 runtime-env 设置（例如各自的 `py_executable`）。各节点需有相同的 QoreRL 代码与兼容的 Ray/Python 版本；不同 Python 环境的 native 接入同样属于待验证项。原生验证先在一台机器上选择分卡模式或下述单卡共置模式，再扩大集群。
+
+<a id="single-gpu-collocation"></a>
+
+### 用 `collocate` 共用一张 GPU
+
+设置 `worker_placement: "collocate"`，让一个 learner 与一个 rollout worker 共用一张 GPU。默认 `"separate"` 仍为每个 worker 分配一张 GPU。共置目前要求 `rollout_workers: 1`：两端是独立进程、同时驻留显存，按同步循环依次执行采样、训练、校准和发布。本模式没有增加异步采样、sleep/offload 或模型张量共享。
+
+先使用[单卡 BF16 配置](../configs/grpo_single_gpu.json)：Qwen3-1.7B、每个 microbatch 一个回答、上下文上限 512。
+
+```bash
+qorerl train --config configs/grpo_single_gpu.json --out results/single-gpu-bf16
+```
+
+已有 recipe 配置也可在顶层添加这些设置：
+
+```json
+{
+  "worker_placement": "collocate",
+  "rollout_workers": 1,
+  "gpu_memory_utilization": 0.2
+}
+```
+
+部署方式不改变 recipe 或硬件要求。在支持对应算子的 GPU 上，SmoothQuant 仍走原来的校准、确认、应用与发布流程。
+
+运行时申请一个含两个 CPU 和一张 GPU 的 Ray placement bundle。每个 worker 占一个 CPU 和 0.5 个 GPU 调度资源，并检查两端报告的 Ray node 与 GPU ID 相同。`workers.json` 记录这些分配，`summary.json` 记录 `worker_placement`。**Ray 的小数 GPU 资源不会自动切分显存。** 详见 [Ray 文档](https://docs.ray.io/en/latest/ray-core/scheduling/accelerators.html#fractional-accelerators)。
+
+learner 加载完成后，才启动 vLLM 的显存 profiling；续训时会先恢复 learner 的 optimizer state。之后两端同时驻留。省略 `gpu_memory_utilization` 时，共置默认 **0.2**，分卡默认 **0.7**；显式值保持不变，解析后的数值写入配置。这个比例是 vLLM executor 对整张物理 GPU 总显存的预算，不是剩余显存的比例。详见 [vLLM 文档](https://docs.vllm.ai/en/latest/configuration/engine_args/#--gpu-memory-utilization)。
+
+仍需为 learner 激活峰值、首次真实更新时才分配的 Adam 状态、权重重建缓存、校准和 CUDA workspace 留空间。默认预算不保证任意模型、batch 或上下文都能装下。建议先验证 1.7B，再依据实测峰值尝试 4B。同时检查 `optimizer_steps` 确实前进：内置加法任务可能产生全零优势组，从而跳过更新。
+
+| 硬件 | 当前可以验证的范围 |
+| --- | --- |
+| H200，141GB | BF16 GRPO，以及共置、发布和恢复链路；仍需验证原生依赖与显存峰值。H200 支持 FP8，但 QoreRL 尚无 Hopper FP8 适配器。 |
+| B200，180GB | BF16 和现有原生 MXFP8/NVFP4 recipe，包括 SmoothQuant；原生数值和性能验证仍待进行。 |
+
+H200 不能执行当前原生 MXFP8/NVFP4 算子。硬件检查继续保留，不会静默替换成模拟量化或其他格式。依据：[NVIDIA 显存规格](https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html)、[TE 硬件支持](https://docs.nvidia.com/deeplearning/transformer-engine/support_matrix.html)。
+
+本地测试覆盖真实 Ray 对**逻辑 GPU 资源**的分配、跨部署模式的 CPU 断点续训和 CPU SmoothQuant 审核发布流程。这些测试不能证明 CUDA 显存共存或 GPU 训练正确。GPU 验收需记录两端在真实 optimizer update、权重重建和校准后的显存峰值，并验证共置模式的恢复。
 
 ### 原生 NVFP4 需要什么
 

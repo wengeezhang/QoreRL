@@ -11,7 +11,8 @@ from qorerl.runtime.ray_runtime import run_sync_grpo
 from qorerl.training.config import TrainConfig
 
 
-def test_ray_group_training_and_resume(tmp_path):
+@pytest.mark.parametrize("placement,replicas", [("separate", 2), ("collocate", 1)])
+def test_ray_group_training_and_resume(tmp_path, placement, replicas):
     cfg = TrainConfig(
         learner_backend="torch_test",
         rollout_backend="torch_test",
@@ -22,18 +23,26 @@ def test_ray_group_training_and_resume(tmp_path):
         group_size=8,
         max_new_tokens=1,
         max_model_len=16,
-        rollout_workers=2,
+        rollout_workers=replicas,
+        worker_placement=placement,
         learning_rate=0.003,
         micro_batch_size=7,
         checkpoint_every=2,
         rpc_timeout=60,
     )
     uninterrupted = run_sync_grpo(cfg, tmp_path / "continuous")
-    partial = run_sync_grpo(replace(cfg, steps=2), tmp_path / "partial")
+    # Exercise migration from separate placement into collocation on resume.
+    partial = run_sync_grpo(
+        replace(cfg, steps=2, worker_placement="separate", gpu_memory_utilization=0.7), tmp_path / "partial"
+    )
     resumed = run_sync_grpo(cfg, tmp_path / "resumed", resume=partial["checkpoint"])
     workers = json.loads((tmp_path / "continuous/workers.json").read_text())
     pids = [w["pid"] for w in workers["workers"]]
-    assert len(set(pids)) == 3 and workers["driver_pid"] not in pids
+    assert len(set(pids)) == replicas + 1 and workers["driver_pid"] not in pids
+    assert workers["placement"] == placement
+    assert all(worker["gpu_ids"] == [] for worker in workers["workers"])
+    if placement == "collocate":
+        assert len({worker["node"] for worker in workers["workers"]}) == 1
     rows = [
         json.loads(line) for line in (tmp_path / "continuous/trajectories.jsonl").read_text().splitlines()
     ]
@@ -43,6 +52,7 @@ def test_ray_group_training_and_resume(tmp_path):
     assert not uninterrupted["native_gpu_executed"]
     assert uninterrupted["native_gpu_acceptance"] == "not_applicable"
     assert resumed["first_step"] == 2 and resumed["last_step"] == 3
+    assert resumed["worker_placement"] == placement
     a = torch.load(uninterrupted["checkpoint"] + "/learner.pt", weights_only=True)
     b = torch.load(resumed["checkpoint"] + "/learner.pt", weights_only=True)
     assert a["optimizer_steps"] == b["optimizer_steps"] > 0
@@ -77,7 +87,10 @@ def test_resume_accepts_legacy_and_current_metadata(tmp_path, schema):
         if schema == 1
         else {"policy_version": {"weight_version": 1, "recipe_id": cfg.policy_recipe_id}}
     )
-    metadata = {"schema": schema, "config": cfg.to_dict(), "step": 1, **policy}
+    config = cfg.to_dict()
+    # Checkpoints written before placement was configurable retain their defaults.
+    del config["worker_placement"]
+    metadata = {"schema": schema, "config": config, "step": 1, **policy}
     (tmp_path / "metadata.json").write_text(json.dumps(metadata))
     restored = resume_metadata(tmp_path, cfg)
     assert restored["policy_version"] == {"weight_version": 1, "recipe_id": cfg.policy_recipe_id}

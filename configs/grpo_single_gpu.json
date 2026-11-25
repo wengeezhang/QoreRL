@@ -1,0 +1,18 @@
+{
+  "learner_backend": "megatron",
+  "rollout_backend": "vllm",
+  "model": "Qwen/Qwen3-1.7B",
+  "model_revision": "main",
+  "worker_placement": "collocate",
+  "gpu_memory_utilization": 0.2,
+  "rollout_workers": 1,
+  "steps": 10,
+  "prompts_per_step": 4,
+  "group_size": 4,
+  "micro_batch_size": 1,
+  "update_epochs": 1,
+  "max_new_tokens": 64,
+  "max_model_len": 512,
+  "checkpoint_every": 5,
+  "recipe_id": "bf16-baseline-v1"
+}

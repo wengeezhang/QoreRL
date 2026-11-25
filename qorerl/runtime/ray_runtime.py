@@ -19,6 +19,7 @@ from qorerl.runtime.calibration import (
     review_id,
 )
 from qorerl.runtime.checkpoint import resume_metadata, save_checkpoint, write_json
+from qorerl.runtime.placement import WorkerPlacement
 from qorerl.runtime.ray_workers import RayLearnerWorker, RayRolloutWorker
 from qorerl.training.contracts import PolicyVersion, TrainingBatch, validate_and_order_trajectories
 from qorerl.training.objective import compute_group_advantages
@@ -31,7 +32,7 @@ def append_json(path, value):
 
 
 def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=None, reject_candidate=None):
-    """One learner rank and independently placed rollout replicas.
+    """One learner rank with separate or single-GPU collocated rollout.
 
     State machine: publish/ack -> sample -> assemble -> update -> publish/ack.
     No actor method is retried after a failure: update/refit are mutations.
@@ -76,37 +77,47 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
         if owned_ray:
             options = {"address": address} if address else {"num_cpus": cfg.rollout_workers + 1}
             ray.init(**options, include_dashboard=False, log_to_driver=False)
-        gpus = 0 if cfg.is_cpu_test else 1
-        resources = ray.cluster_resources()
-        required = cfg.rollout_workers + 1
-        if resources.get("CPU", 0) < required or resources.get("GPU", 0) < gpus * required:
-            raise RuntimeError(f"Need {required} CPUs and {gpus * required} GPUs; found {resources}")
-        bundles = [{"CPU": 1, **({"GPU": 1} if gpus else {})} for _ in range(required)]
-        resource_group = placement_group(bundles, strategy="PACK")
+        placement = WorkerPlacement.from_config(cfg)
+        placement.check_resources(ray.cluster_resources())
+        resource_group = placement_group(placement.bundles, strategy="PACK")
         ray.get(resource_group.ready(), timeout=cfg.rpc_timeout)
 
         def actor_options(index, env):
             return dict(
                 num_cpus=1,
-                num_gpus=gpus,
+                num_gpus=placement.gpus_per_worker,
                 runtime_env=env,
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=resource_group,
-                    placement_group_bundle_index=index,
+                    placement_group_bundle_index=placement.bundle_index(index),
                     placement_group_capture_child_tasks=False,
                 ),
             )
 
         learner = RayLearnerWorker.options(**actor_options(0, cfg.learner_runtime_env)).remote(cfg)
         worker_handles.append(learner)
+        learner_info = None
+        if placement.collocate:
+            # vLLM profiles free memory during startup. Finish learner loading
+            # (including restored Adam states) before that profile can begin.
+            learner_info = ray.get(learner.ready.remote(), timeout=cfg.rpc_timeout)
+            if resume:
+                ray.get(learner.restore.remote(read_payload(resume, review)), timeout=cfg.rpc_timeout)
         rollout_workers = []
         for i in range(cfg.rollout_workers):
             worker = RayRolloutWorker.options(**actor_options(i + 1, cfg.rollout_runtime_env)).remote(cfg)
             rollout_workers.append(worker)
             worker_handles.append(worker)
-        info = ray.get([worker.ready.remote() for worker in worker_handles], timeout=cfg.rpc_timeout)
-        write_json(directory / "workers.json", {"driver_pid": os.getpid(), "workers": info})
-        if resume:
+        ready_workers = rollout_workers if placement.collocate else worker_handles
+        info = ray.get([worker.ready.remote() for worker in ready_workers], timeout=cfg.rpc_timeout)
+        if placement.collocate:
+            info.insert(0, learner_info)
+        placement.check_workers(info)
+        write_json(
+            directory / "workers.json",
+            {"driver_pid": os.getpid(), "placement": cfg.worker_placement, "workers": info},
+        )
+        if resume and not placement.collocate:
             ray.get(learner.restore.remote(read_payload(resume, review)), timeout=cfg.rpc_timeout)
 
         def publish(expected=None):
@@ -286,6 +297,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
             "status": "awaiting_review" if pending_id else "completed",
             **({"candidate_id": pending_id} if pending_id else {}),
             "backend": f"{cfg.learner_backend}/{cfg.rollout_backend}",
+            "worker_placement": cfg.worker_placement,
             "first_step": first_step,
             "last_step": step,
             "final_metrics": metrics,

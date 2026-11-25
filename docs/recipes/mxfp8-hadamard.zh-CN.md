@@ -16,7 +16,7 @@
 
 这三份配置的模型、训练任务、seed、batch、学习率及训练步数相同。默认选择每个 Transformer block 的 `mlp.down_proj`，不是全模型 MXFP8。这里的 MLP 输入具体是 SwiGLU 之后、down projection 之前的激活；不旋转 gate/up projection，不穿过 SiLU，也不改 attention、router 或 `lm_head`。
 
-首版仅接受未量化的 **dense Qwen3**，使用一张 learner GPU 和一张 rollout GPU，TP/PP/CP/EP 为 1。MoE、模型并行、CUDA graph、prefix cache、预量化 checkpoint 均不在当前验证范围内。CPU 测试引擎不能启用这两个 recipe；不支持的配置直接报错，没有模拟量化或 BF16 静默兜底。
+首版仅接受未量化的 **dense Qwen3**，TP/PP/CP/EP 为 1；一个 learner 与一个 rollout worker 可以分别使用一张 GPU，或[共置于同一张 GPU](../ray-grpo.zh-CN.md#single-gpu-collocation)。MoE、模型并行、CUDA graph、prefix cache、预量化 checkpoint 均不在当前验证范围内。CPU 测试引擎不能启用这两个 recipe；不支持的配置直接报错，没有模拟量化或 BF16 静默兜底。
 
 配置示例：
 

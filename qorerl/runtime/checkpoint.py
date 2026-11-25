@@ -60,6 +60,8 @@ def resume_metadata(path, cfg):
         "learner_runtime_env",
         "rollout_runtime_env",
         "recipe_observation",  # Diagnostics neither change the recipe nor its learned state.
+        "worker_placement",  # Deployment layout does not change the saved training state.
+        "gpu_memory_utilization",  # vLLM budget; all models are loaded again on resume.
     }
     previous_config = previous.to_dict()
     changed = [

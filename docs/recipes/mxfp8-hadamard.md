@@ -14,7 +14,7 @@ With the same MLP down projections quantized, does adding a fixed Hadamard rotat
 
 All three use the same model, task, seed, batch, learning rate, and number of steps. By default the recipe targets `mlp.down_proj` in every Transformer block. It rotates the activations **after SwiGLU and immediately before the down projection**. The gate and up projections, SiLU, attention, router, and `lm_head` stay on their original paths.
 
-The first native implementation accepts an unquantized **dense Qwen3** checkpoint, one learner GPU, one rollout GPU, and TP/PP/CP/EP all set to 1. MoE, model parallelism, CUDA graphs, prefix caching, and prequantized checkpoints are outside the current validation scope. The CPU test engine rejects these two native recipe configurations. Unsupported combinations raise an error.
+The first native implementation accepts an unquantized **dense Qwen3** checkpoint, TP/PP/CP/EP all set to 1, and either separate GPUs or [single-GPU collocation](../ray-grpo.md#single-gpu-collocation) for one learner and one rollout worker. MoE, model parallelism, CUDA graphs, prefix caching, and prequantized checkpoints are outside the current validation scope. The CPU test engine rejects these two native recipe configurations. Unsupported combinations raise an error.
 
 ```json
 {

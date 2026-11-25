@@ -45,7 +45,13 @@ def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cl
         if expand
         else {"layers": [0, 1, 2]}
     )
-    cfg = replace(TrainConfig.load(CONFIG), steps=2, recipe_options=options)
+    cfg = replace(
+        TrainConfig.load(CONFIG),
+        steps=2,
+        recipe_options=options,
+        worker_placement="collocate" if expand else "separate",
+        rollout_workers=1 if expand else 2,
+    )
     base = {down_proj_name(index) for index in options["layers"]}
     initial_overlay = {down_proj_name(1)} if expand else base
     candidate_target = down_proj_name(0)

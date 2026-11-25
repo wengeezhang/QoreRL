@@ -28,7 +28,8 @@ class TrainConfig:
     max_new_tokens: int = 64
     max_model_len: int = 512
     rollout_workers: int = 1
-    gpu_memory_utilization: float = 0.7
+    worker_placement: str = "separate"
+    gpu_memory_utilization: float | None = None
     checkpoint_every: int = 5
     rpc_timeout: float = 600.0
     recipe_id: str = "mlp-down-v1"
@@ -65,6 +66,17 @@ class TrainConfig:
         return None
 
     def __post_init__(self):
+        if self.worker_placement not in ("separate", "collocate"):
+            raise ValueError("worker_placement must be separate or collocate")
+        if self.worker_placement == "collocate" and self.rollout_workers != 1:
+            raise ValueError("collocate currently requires exactly one rollout worker")
+        if self.gpu_memory_utilization is None:
+            # Reserve room for learner parameters, optimizer state and activations
+            # when both engines remain resident on one GPU. This is a budget,
+            # not a guarantee that a particular model or batch will fit.
+            object.__setattr__(
+                self, "gpu_memory_utilization", 0.2 if self.worker_placement == "collocate" else 0.7
+            )
         pair = (self.learner_backend, self.rollout_backend)
         if pair not in {("megatron", "vllm"), ("torch_test", "torch_test")}:
             raise ValueError("Supported pairs: megatron/vllm or explicit torch_test/torch_test")
@@ -113,7 +125,11 @@ class TrainConfig:
         for name in ("learning_rate", "max_grad_norm", "rpc_timeout"):
             if not math.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive and finite")
-        if not 0 < self.clip_epsilon < 1 or not 0 < self.gpu_memory_utilization < 1:
+        if (
+            type(self.gpu_memory_utilization) not in (int, float)
+            or not 0 < self.clip_epsilon < 1
+            or not 0 < self.gpu_memory_utilization < 1
+        ):
             raise ValueError("clip_epsilon and gpu_memory_utilization must be between 0 and 1")
         if self.max_new_tokens >= self.max_model_len:
             raise ValueError("max_new_tokens must leave room for the prompt")

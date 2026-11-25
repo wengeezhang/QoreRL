@@ -4,7 +4,8 @@ The checkboxes track implementation. Native GPU validation and evidence of a ben
 
 ## P0 · Validate the native BF16 baseline
 
-- [ ] Run Megatron and vLLM on the same dual-NVIDIA-GPU host. Record the GPU, CUDA, PyTorch, Transformer Engine (TE), Bridge, Megatron Core and vLLM versions, and the exact commands.
+- [x] Add explicit separate/collocated Ray placement, serialized collocated startup, a configurable vLLM memory budget, and placement changes on checkpoint resume. CPU workflow and logical-GPU scheduling tests cover the control path; CUDA coexistence remains unvalidated.
+- [ ] Run Megatron and vLLM on one NVIDIA host, using separate GPUs or single-GPU collocation. Measure both processes' peak memory after optimizer updates, weight refits and calibration. Record the GPU, CUDA, PyTorch, Transformer Engine (TE), Bridge, Megatron Core and vLLM versions, and the exact commands.
 - [ ] Score the same token sequences on both engines at the same snapshot. Check for non-finite log probabilities and inspect the tails of the differences. Measure policy changes due to an optimizer update separately.
 - [ ] Complete at least two real optimizer updates and refits with nonzero within-group advantages. Check that weight contents change, every target receives its update, and inference uses the new weights.
 - [ ] Check loss and gradient normalization with EOS, length truncation, variable-length samples and different microbatch sizes.
@@ -70,7 +71,7 @@ Acceptance means a user can select a supported adjustment from the evidence, res
 | Dynamic batching and sequence packing | Padding or variable-length workloads measurably raise cost | Preserve per-response and valid-token reductions. Check masks at boundaries, reordering and gradient accumulation. |
 | Cache, CUDA graph and performance work | Native correctness is established and a profile identifies the cost | Verify cache and graph references after refit. Measure actual execution, numerical behavior and cost. |
 | Asynchronous rollout and training | Measurements identify synchronous waiting as a major bottleneck | Decouple published versions from batch steps. Define staleness, correction and discard policies. Retain the behavior log probabilities and version used to collect each sample. |
-| Independent Ray resource and lifecycle management | A second deployment or scheduling scheme needs it | Keep the training loop readable and extract components with distinct responsibilities. |
+| Extend Ray resource and lifecycle management | Worker groups, offload or another scheduling scheme needs it | Build on the separate/collocated placement boundary; keep scheduling, memory lifecycle and training orchestration responsibilities explicit. |
 
 Execution can evolve while sample identity, behavior log probabilities, recipe identity, publication acknowledgments and recovery boundaries stay explicit. Use versioned schemas and migrations for protocol changes.
 

@@ -8,7 +8,7 @@ The native path defaults to direct MXFP8 on selected projections. The repository
 
 ## 1. Follow one training batch
 
-The default native scenario trains `Qwen/Qwen3-0.6B` on integer addition. The prompt uses the non-thinking template and asks for an integer. Each prompt produces four responses. An exact integer answer earns 1, and other answers earn 0. The default batch has four prompts and 16 responses.
+The default native scenario trains `Qwen/Qwen3-0.6B` on integer addition. The prompt uses the non-thinking template and asks for an integer. Each prompt produces four responses. An exact integer answer earns 1, and other answers earn 0. The default batch has four prompts and 16 responses. The diagram shows the default `worker_placement: "separate"`; [single-GPU collocation](#single-gpu-collocation) keeps the same worker and publication boundaries.
 
 ```text
 Driver / coordinator (orchestration only)
@@ -79,7 +79,7 @@ The CPU fixture uses a small GRU for digit copying, one learner process, and two
 results/ray-local/
   config.json                 Resolved configuration and model revision
   recipe.json                 Resolved numerical specification and identity
-  workers.json                Driver/worker process and Ray node IDs
+  workers.json                Placement mode, process IDs, Ray node and assigned GPU IDs
   metrics.jsonl               Loss, reward, ratios, clipping, gradient norm, stage timings
   trajectories.jsonl          Tokens, behavior log-probs, rewards, advantages, and versions
   checkpoints/step-000000/    Initial boundary before sampling
@@ -106,7 +106,7 @@ uv run qorerl train \
 
 Resume creates fresh workers, restores the learner's full state, re-exports and synchronizes weights, and then generates new trajectories. It writes to a new output directory and preserves the original run.
 
-You can change total steps, checkpoint frequency, RPC timeout, worker runtime environments, and observation settings at resume. Training semantics, including learning rate, batch configuration, model revision, and recipe identity, must match. A pending SmoothQuant proposal can be accepted or rejected when resuming its bound checkpoint. CPU tests compare final model parameters and optimizer state element by element between continuous and resumed runs. GPU reproducibility still needs separate measurement. [Manual candidate review](recipes/dynamic-smoothquant.md#manual-review-on-cpu)
+You can change total steps, checkpoint frequency, RPC timeout, worker runtime environments, worker placement, vLLM's memory budget, and observation settings at resume. Training semantics, including learning rate, batch configuration, model revision, and recipe identity, must match. A pending SmoothQuant proposal can be accepted or rejected when resuming its bound checkpoint. CPU tests compare final model parameters and optimizer state element by element between continuous and resumed runs. GPU reproducibility still needs separate measurement. [Manual candidate review](recipes/dynamic-smoothquant.md#manual-review-on-cpu)
 
 MXFP8 synchronization and recovery also check the actual target shapes and fixed signs before rebuilding rollout caches. Parameters and optimizer state stay in the original coordinates. [Recipe setup and comparison commands](recipes/mxfp8-hadamard.md)
 
@@ -123,7 +123,7 @@ The native adapters target these upstream interfaces. The exact combination stil
 - vLLM `0.32.0` for `LLM`, `SamplingParams`, worker extensions, and `collective_rpc`.
 - Install compatible Transformer Engine, PyTorch, CUDA, and FlashAttention versions for the GPU image. The local development lockfile covers CPU development.
 
-The initial scope is an unquantized dense Qwen3, one learner GPU and one rollout GPU, with TP/PP/CP/EP all equal to 1. After installing the native dependencies in the target environment, install QoreRL and run the BF16 reference:
+The initial scope is an unquantized dense Qwen3 with TP/PP/CP/EP all equal to 1. Separate placement uses one learner GPU and one GPU per rollout worker; collocation shares one GPU between one learner and one rollout worker. After installing the native dependencies in the target environment, install QoreRL and run the BF16 reference:
 
 ```bash
 uv pip install -e .
@@ -132,7 +132,46 @@ qorerl train --config configs/grpo_megatron_vllm.json --out results/native-basel
 
 The CPU quick start's `uv sync` handles development dependencies. It does not provision the CUDA stack and can remove preinstalled packages missing from the project lockfile.
 
-If learner and rollout dependencies conflict, configure separate environments using Ray runtime-env settings in `learner_runtime_env` and `rollout_runtime_env`, for example distinct `py_executable` values. Each node needs the same QoreRL code and compatible Ray and Python versions. Start native validation on a single dual-GPU machine. Cross-environment execution still needs verification there.
+If learner and rollout dependencies conflict, configure separate environments using Ray runtime-env settings in `learner_runtime_env` and `rollout_runtime_env`, for example distinct `py_executable` values. Each node needs the same QoreRL code and compatible Ray and Python versions. Start native validation on one host using separate GPUs or the single-GPU mode below. Cross-environment execution still needs verification.
+
+<a id="single-gpu-collocation"></a>
+
+### Share one GPU with `collocate`
+
+Set `worker_placement: "collocate"` to place one learner and one rollout worker on the same GPU. The default `"separate"` requests one GPU per worker. Collocation currently requires `rollout_workers: 1`; both engines remain resident in separate processes and the synchronous loop alternates generation, training, calibration and publication. This mode does not add asynchronous sampling, sleep/offload, or shared model tensors.
+
+Start with the [single-GPU BF16 configuration](../configs/grpo_single_gpu.json): Qwen3-1.7B, a microbatch of one response, and a context limit of 512.
+
+```bash
+qorerl train --config configs/grpo_single_gpu.json --out results/single-gpu-bf16
+```
+
+The placement settings also apply to existing recipe configurations:
+
+```json
+{
+  "worker_placement": "collocate",
+  "rollout_workers": 1,
+  "gpu_memory_utilization": 0.2
+}
+```
+
+These fields belong at the top level of a training configuration. They do not change the recipe or its supported hardware. Add them to a SmoothQuant configuration to use the same calibration and approval workflow on one supported GPU.
+
+The runtime reserves a single Ray placement bundle with two CPUs and one GPU. Each worker requests one CPU and half of the bundle's GPU scheduling resource. It verifies that both report the same Ray node and assigned GPU ID. These assignments are recorded in `workers.json`; `summary.json` also records `worker_placement`. **Fractional Ray resources do not partition GPU memory.** See [Ray accelerator scheduling](https://docs.ray.io/en/latest/ray-core/scheduling/accelerators.html#fractional-accelerators).
+
+Learner initialization finishes before vLLM starts profiling memory. On resume, this includes restoring optimizer state. Both engines stay resident afterward. Omitted `gpu_memory_utilization` resolves to **0.2 for collocation** and **0.7 for separate placement**; an explicit value is preserved and saved in the resolved configuration. The budget is the fraction of the physical GPU's total memory available to vLLM's executor, not a fraction of free memory. See [vLLM's memory budget](https://docs.vllm.ai/en/latest/configuration/engine_args/#--gpu-memory-utilization).
+
+Leave room for learner activation peaks, lazy Adam state allocation on the first real update, weight refit caches, calibration and CUDA workspaces. A smaller model can still run out of memory with a large batch or context; the default budget is not an admission guarantee. Start with Qwen3-1.7B, then measure peak memory before trying 4B. Check that `optimizer_steps` advances: the built-in addition task can produce all-zero-advantage groups that skip updates.
+
+| Hardware | What this configuration can exercise |
+| --- | --- |
+| H200, 141GB | BF16 GRPO and the placement/publication/recovery path, subject to native dependency validation and memory measurements. H200 supports FP8, but QoreRL does not yet have a Hopper FP8 adapter. |
+| B200, 180GB | BF16 and the current native MXFP8/NVFP4 recipe paths, including SmoothQuant. Native numerical and performance validation is still pending. |
+
+H200 cannot execute QoreRL's current native MXFP8/NVFP4 kernels. The runtime retains its capability checks and never substitutes emulation or another format. See [NVIDIA memory specifications](https://docs.nvidia.com/enterprise-reference-architectures/hgx-ai-factory-h100-h200-b200/latest/components.html) and [TE hardware support](https://docs.nvidia.com/deeplearning/transformer-engine/support_matrix.html).
+
+Local tests cover real Ray scheduling with **logical GPU resources only**, CPU training across a placement change on resume, and the CPU SmoothQuant review/publication workflow. They do not establish CUDA memory coexistence or GPU training correctness. For native acceptance, record peak memory for both processes after real optimizer updates, refit and calibration, and test recovery in this mode.
 
 <a id="native-nvfp4-requirements"></a>
 

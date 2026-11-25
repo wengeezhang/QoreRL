@@ -18,6 +18,7 @@ class RayLearnerWorker:
             "role": "learner",
             "pid": os.getpid(),
             "node": ray.get_runtime_context().get_node_id(),
+            "gpu_ids": ray.get_runtime_context().get_accelerator_ids().get("GPU", []),
             "execution": self.execution_report(),
         }
 
@@ -63,6 +64,7 @@ class RayRolloutWorker:
             "role": "rollout",
             "pid": os.getpid(),
             "node": ray.get_runtime_context().get_node_id(),
+            "gpu_ids": ray.get_runtime_context().get_accelerator_ids().get("GPU", []),
             "execution": self.execution_report(),
         }
 
