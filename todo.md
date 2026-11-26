@@ -4,6 +4,8 @@ The checkboxes track implementation. Native GPU validation and evidence of a ben
 
 ## P0 · Validate the native BF16 baseline
 
+- [x] Add GPU environment preflight and a separate JSON/Markdown smoke audit for real updates, checkpoint tensor changes, publication acknowledgments and sampled-token log-prob gaps. Record executing-process versions and allocator peaks. Local tests cover acceptance logic; native execution, recovery and task quality remain unvalidated. [Runbook](docs/gpu-validation.md)
+
 - [x] Add explicit separate/collocated Ray placement, serialized collocated startup, a configurable vLLM memory budget, and placement changes on checkpoint resume. CPU workflow and logical-GPU scheduling tests cover the control path; CUDA coexistence remains unvalidated.
 - [ ] Run Megatron and vLLM on one NVIDIA host, using separate GPUs or single-GPU collocation. Measure both processes' peak memory after optimizer updates, weight refits and calibration. Record the GPU, CUDA, PyTorch, Transformer Engine (TE), Bridge, Megatron Core and vLLM versions, and the exact commands.
 - [ ] Score the same token sequences on both engines at the same snapshot. Check for non-finite log probabilities and inspect the tails of the differences. Measure policy changes due to an optimizer update separately.
@@ -39,6 +41,7 @@ Acceptance requires reproducible BF16 and MXFP8 comparisons on the same workload
 [Recipe Insights](docs/recipe-insights.md) describes the current probes and what they measure. Native GPU measurements are pending.
 
 - [x] Add opt-in probes that rotate through two layers every 20 steps by default. Bound the input rows and bytes copied from canonical weights. Replay the three forward configurations with paired inputs and weights captured before the update, and record versions and failures.
+- [x] Reuse SmoothQuant calibration logs for per-window current/candidate charts, outlier evidence, and review/publication history across explicitly linked run segments. Export HTML/SVG/PNG and label CPU simulation separately. No additional model replay; native measurements pending.
 - [x] Provide a live layer view, standalone HTML reports and a clearly labeled synthetic demo. Allow diagnostics to change on resume independently of the training recipe.
 - [ ] Validate sampling, CUDA event timing and error measurements on native GPUs. Check RNG, parameters, gradients and training outcomes with and without probes. Measure total wall time and peak memory directly in addition to `probe_seconds` and the copy budget.
 - [ ] Add Dgrad, Wgrad and gradient-direction probes when a concrete question warrants them. Retain paired references and account for the cost of saving upstream gradients and activations. Measure training quality separately.

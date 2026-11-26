@@ -115,6 +115,8 @@ class MegatronLearner(SingleRankGRPOLearner):
         return snapshot
 
     def execution_report(self):
+        from qorerl.validation import environment_report
+
         if self.recipe_installation is not None:
             report = self.recipe_installation.report()
             if self.cfg.observation.enabled:
@@ -124,8 +126,10 @@ class MegatronLearner(SingleRankGRPOLearner):
                     "phase": "learner.fprop",
                     "interpretation": "local paired output error against BF16; not training quality",
                 }
-            return report
-        return {"identity": self.cfg.policy_recipe_id, "precision": "bf16", "validation": "pending"}
+        else:
+            report = {"identity": self.cfg.policy_recipe_id, "precision": "bf16", "validation": "pending"}
+        report["environment"] = environment_report()
+        return report
 
     def close(self):
         from megatron.core import parallel_state

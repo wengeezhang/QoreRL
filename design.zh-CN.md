@@ -189,4 +189,5 @@ Rollout 为每道题生成一组回答。编排端核对策略版本与分组完
 | --- | --- |
 | `config.json`、`recipe.json`、`workers.json` | 复核启动条件时，分别查看解析后的训练配置、recipe 的规格及初始选层、实际启动的进程。本例 `recipe.json` 中的 `layers: [0,1]` 是固定的低精度范围，`smoothquant_layers: [1]` 是最初使用 S 的层。后续 S 的覆盖范围可从发布记录中核对。 |
 | `metrics.jsonl`、`trajectories.jsonl` | 排查某个训练批时，前者每批一行，包含 `reward_mean`、`clip_fraction` 等。后者保留该批实际采样的 token、行为策略 log-prob、版本，以及对应的奖励与优势。 |
+| `publications.jsonl` | 成功发布后记录目标策略和所有 rollout 确认，`validate-run` 对照后续采样版本检查。校准事件和保存的候选通过可选 `evaluation_id` 跨人工恢复关联；`inspect --related-run` 显式连接证据，不自动跟随日志里的路径。[观测与验收](docs/gpu-validation.zh-CN.md) |
 | `recipe_metrics.jsonl`、`incident.json` | 启用 Recipe Insights 且产生逐层观测时，前者记录局部比较。训练运行异常退出时，后者记录异常类型、消息和最近的恢复点 `last_recovery_checkpoint`。正常等待审核属于 `summary.json` 的状态。 |

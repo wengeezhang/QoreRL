@@ -44,6 +44,7 @@ def grpo_loss(logits, batch, clip_epsilon):
         "loss": loss.detach().item(),
         "ratio_sum": ratio.detach()[mask].sum().item(),
         "abs_log_ratio_sum": delta.detach()[mask].abs().sum().item(),
+        "abs_log_ratio_max": delta.detach()[mask].abs().max().item(),
         "clipped_tokens": ((raw > clipped) & mask).sum().item(),
         "tokens": lengths.sum().item(),
     }

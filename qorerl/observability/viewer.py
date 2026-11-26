@@ -10,6 +10,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from qorerl.observability.calibration import load_calibration
+
 _MAX_METRICS_BYTES = 16 * 1024 * 1024
 _MAX_CONFIG_BYTES = 1024 * 1024
 _VARIANTS = ("bf16", "mxfp8", "mxfp8_hadamard")
@@ -90,8 +92,8 @@ def _record(value: object) -> dict:
     return result
 
 
-def load_report(run_dir: Path) -> dict:
-    """Read only config.json and recipe_metrics.jsonl, tolerating an active writer.
+def load_report(run_dir: Path, *, related_runs=()) -> dict:
+    """Read probe/calibration artifacts, tolerating an active writer.
 
     The final unterminated JSONL line is left for the next poll. Completed invalid
     lines are reported. Very large histories are bounded to their final 16 MiB;
@@ -116,6 +118,19 @@ def load_report(run_dir: Path) -> dict:
         pass
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         warnings.append(f"Could not read config.json: {type(exc).__name__}.")
+    calibration = load_calibration([*related_runs, run_dir], warnings)
+    if (
+        calibration["evaluations"]
+        or calibration["events"]
+        or report["metadata"].get("recipe_calibration")
+        or "smoothquant" in str(report["metadata"].get("recipe_id", ""))
+    ):
+        report["calibration"] = calibration
+        for directory in [*related_runs, run_dir]:
+            if (Path(directory) / "incident.json").exists():
+                warnings.append(
+                    f"{directory}/incident.json: this run stopped on an error; inspect the incident."
+                )
     try:
         with (run_dir / "recipe_metrics.jsonl").open("rb") as stream:
             stream.seek(0, 2)
@@ -154,8 +169,16 @@ def load_report(run_dir: Path) -> dict:
     return report
 
 
-def _html(report: dict, *, live: bool) -> str:
-    template = Path(__file__).with_name("dashboard.html").read_text(encoding="utf-8")
+def _html(report: dict, *, live: bool, view="auto") -> str:
+    if view not in ("auto", "probes", "calibration"):
+        raise ValueError("view must be auto, probes, or calibration")
+    calibration = view == "calibration" or (
+        view == "auto"
+        and "calibration" in report
+        and (not report["records"] or "smoothquant" in str(report["metadata"].get("recipe_id", "")))
+    )
+    name = "calibration.html" if calibration else "dashboard.html"
+    template = Path(__file__).with_name(name).read_text(encoding="utf-8")
     # HTML's script parser processes closing tags even in application/json scripts.
     payload = json.dumps(report, ensure_ascii=True, allow_nan=False).replace("<", "\\u003c")
     mark = Path(__file__).with_name("assets").joinpath("qorerl-mark.png").read_bytes()
@@ -167,15 +190,17 @@ def _html(report: dict, *, live: bool) -> str:
     )
 
 
-def export_report(run_dir: Path, output: Path) -> Path:
+def export_report(run_dir: Path, output: Path, *, related_runs=(), view="auto") -> Path:
     """Write a standalone report with embedded data and no network dependencies."""
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(_html(load_report(run_dir), live=False), encoding="utf-8")
+    output.write_text(
+        _html(load_report(run_dir, related_runs=related_runs), live=False, view=view), encoding="utf-8"
+    )
     return output
 
 
-def _make_server(run_dir: Path, host: str, port: int) -> ThreadingHTTPServer:
+def _make_server(run_dir: Path, host: str, port: int, *, related_runs=(), view="auto") -> ThreadingHTTPServer:
     if host != "localhost":
         try:
             loopback = ipaddress.ip_address(host).is_loopback
@@ -189,10 +214,14 @@ def _make_server(run_dir: Path, host: str, port: int) -> ThreadingHTTPServer:
         def do_GET(self) -> None:
             path = urlsplit(self.path).path
             if path in ("/", "/index.html"):
-                body = _html(load_report(run_dir), live=True).encode("utf-8")
+                body = _html(load_report(run_dir, related_runs=related_runs), live=True, view=view).encode(
+                    "utf-8"
+                )
                 content_type = "text/html; charset=utf-8"
             elif path == "/api/report":
-                body = json.dumps(load_report(run_dir), ensure_ascii=True, allow_nan=False).encode("utf-8")
+                body = json.dumps(
+                    load_report(run_dir, related_runs=related_runs), ensure_ascii=True, allow_nan=False
+                ).encode("utf-8")
                 content_type = "application/json; charset=utf-8"
             else:
                 self.send_error(404, "Not found")
@@ -218,9 +247,9 @@ def _make_server(run_dir: Path, host: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((host, port), Handler)
 
 
-def serve(run_dir: Path, host: str = "127.0.0.1", port: int = 8765) -> None:
+def serve(run_dir: Path, host: str = "127.0.0.1", port: int = 8765, *, related_runs=(), view="auto") -> None:
     """Serve the dashboard and one JSON endpoint until interrupted."""
-    server = _make_server(Path(run_dir), host, port)
+    server = _make_server(Path(run_dir), host, port, related_runs=related_runs, view=view)
     print(f"QoreRL Recipe Insights: http://{host}:{server.server_port}", flush=True)
     try:
         server.serve_forever()

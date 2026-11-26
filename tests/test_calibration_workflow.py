@@ -10,6 +10,7 @@ import ray
 import torch
 
 from qorerl.engines.factory import make_learner_engine
+from qorerl.observability.viewer import export_report, load_report
 from qorerl.recipes.state import down_proj_name
 from qorerl.runtime.calibration import (
     crosses_interval,
@@ -21,6 +22,7 @@ from qorerl.runtime.calibration import (
 from qorerl.runtime.ray_runtime import run_sync_grpo
 from qorerl.training.config import TrainConfig
 from qorerl.training.contracts import PolicyVersion
+from qorerl.validation import validate_run
 
 CONFIG = Path(__file__).resolve().parents[1] / "configs/grpo_cpu_smoothquant.json"
 
@@ -115,6 +117,18 @@ def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cl
     a, b = [torch.load(Path(run["checkpoint"]) / "learner.pt", weights_only=True) for run in (auto, accepted)]
     for field in ("model", "master_parameters", "optimizer", "optimizer_steps"):
         torch.testing.assert_close(a[field], b[field], rtol=0, atol=0)
+    # Real persisted CPU evidence drives the same viewer used on GPU runs.
+    report = load_report(tmp_path / "accepted", related_runs=[tmp_path / "paused"])
+    initial = report["calibration"]["evaluations"][0]
+    assert initial["id"] == review["evaluation_id"] == applied["evaluation_id"]
+    assert initial["decision"] == "applied" and initial["source"] == "cpu_simulation"
+    assert not report["warnings"]
+    export_report(tmp_path / "accepted", tmp_path / "calibration.html", related_runs=[tmp_path / "paused"])
+    audit = validate_run(tmp_path / "accepted", related_runs=[tmp_path / "paused"], require_calibration=True)
+    checks = {item["name"]: item["status"] for item in audit["checks"]}
+    assert checks["calibration_apply_and_continue"] == "pass"
+    assert checks["sampling_after_publication"] == "pass"
+    assert checks["native_execution"] == "fail" and audit["result"] == "failed"
 
 
 def test_external_artifact_installed_before_first_sampling_and_restored_without_source_file(

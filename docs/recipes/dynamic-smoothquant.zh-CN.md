@@ -4,6 +4,12 @@
 
 用户先选定哪些层的 `mlp.down_proj` 用低精度计算，再决定其中哪些层启用 SmoothQuant、何时重新校准、由谁批准新的逐通道平滑因子 S。本文以默认的 MXFP8 为例，实验性的 NVFP4 路径沿用相同的选层和校准规则。第一版覆盖单 rank dense Qwen3 的 Megatron/TE learner 和 vLLM rollout。原始 SmoothQuant 研究离线校准的 INT8 推理，QoreRL 将通道缩放用于训练期间。本地 CPU 已验证校准与发布流程，原生 GPU 的执行、开销和训练效果待验证。[原文](https://arxiv.org/abs/2211.10438)
 
+## 查看校准并准备 GPU 验收
+
+校准展示直接复用已有比较记录，关联不同运行段的审批和发布；每次查看一个窗口，保留未通过的候选。[查看和导出校准证据](../recipe-insights.zh-CN.md#smoothquant复用已有校准证据)。
+
+单张 B200 可以从 [`grpo_single_gpu_smoothquant.json`](../../configs/grpo_single_gpu_smoothquant.json) 开始：Qwen3-1.7B、一个共置 rollout worker、microbatch=1，每 20 次实际更新进行人工校准。加载前运行 `gpu-preflight`，完整训练段结束后运行 `validate-run`。[GPU 验收指南](../gpu-validation.zh-CN.md) 说明命令、证据、阈值和仍需验证的内容。原生 GPU 尚未验证；H200 无法执行当前原生 MXFP8 路径。
+
 ## 选择从哪一步开始
 
 选 `smoothquant-mlp-down-v1` 后，先用 `recipe_options.layers` 指定固定的低精度范围，再用 `smoothquant_layers` 指定哪些低精度层初始启用 SmoothQuant。层号从 0 开始，两份名单都针对 `mlp.down_proj`。省略前者会选全部支持的层，省略后者会在全部已选层叠加 S。显式传入 `smoothquant_layers: []` 可从直接 MXFP8 起步，配合 `allow_layer_expansion: true` 等待候选。原生 BF16、直接 MXFP8 和固定 Hadamard MXFP8 也可以单独采集 outlier 证据。下面的校准开关均位于 `recipe_calibration` 中。

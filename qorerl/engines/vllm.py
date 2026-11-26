@@ -47,8 +47,12 @@ class WeightLoaderExtension:
         return len(loaded)
 
     def qorerl_execution_report(self):
+        from qorerl.validation import environment_report
+
         installation = getattr(self, "qorerl_recipe_installation", None)
-        return installation.report() if installation is not None else {"precision": "bf16"}
+        report = installation.report() if installation is not None else {"precision": "bf16"}
+        report["environment"] = environment_report()
+        return report
 
 
 class VLLMRollout:

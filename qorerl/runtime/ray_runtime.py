@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import uuid
 from dataclasses import asdict, replace
 from pathlib import Path
 
@@ -132,6 +133,10 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
             expected = versions[0] if expected is None else expected
             if any(v != expected for v in versions):
                 raise RuntimeError("Rollout acknowledgment does not match the expected policy")
+            append_json(
+                directory / "publications.jsonl",
+                {"policy": asdict(expected), "acknowledged": [asdict(v) for v in versions]},
+            )
             return versions[0]
 
         def apply_and_publish(candidate):
@@ -152,6 +157,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
         ):
             raise RuntimeError("Published policy and coordinator progress disagree")
         if review is not None:
+            apply_started = time.perf_counter()
             if decision != "reject":
                 policy_version = apply_and_publish(review_candidate(review))
             append_json(
@@ -159,9 +165,13 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 {
                     "event": "rejected" if decision == "reject" else "applied",
                     "candidate_id": review_id(review),
+                    "evaluation_id": review.get("evaluation_id"),
                     "source_checkpoint": str(resume),
                     "step": first_step,
                     "policy": asdict(policy_version),
+                    "apply_publish_seconds": (
+                        time.perf_counter() - apply_started if decision != "reject" else None
+                    ),
                 },
             )
         elif offline_calibration_result is not None:
@@ -242,10 +252,12 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 candidate, evidence = ray.get(
                     learner.prepare_candidate.remote(batch_ref), timeout=cfg.rpc_timeout
                 )
+                evaluation_id = uuid.uuid4().hex
                 append_json(
                     event_log,
                     {
                         "event": "evaluated",
+                        "evaluation_id": evaluation_id,
                         "step": step,
                         "policy": asdict(policy_version),
                         "optimizer_steps": metrics["optimizer_steps"],
@@ -256,6 +268,7 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 )
                 if candidate is not None:
                     review = prepare_review(policy_version, metrics["optimizer_steps"], candidate, evidence)
+                    review["evaluation_id"] = evaluation_id
                     last_checkpoint = save_checkpoint(
                         directory, learner, cfg, step, policy_version, review=review
                     )
@@ -266,18 +279,23 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                             event_log,
                             {
                                 "event": "awaiting_review",
+                                "evaluation_id": evaluation_id,
+                                "policy": asdict(policy_version),
                                 "step": step,
                                 "candidate_id": pending_id,
                                 "checkpoint": last_checkpoint,
                             },
                         )
                         break
+                    apply_started = time.perf_counter()
                     policy_version = apply_and_publish(candidate)
                     applied = True
                     append_json(
                         event_log,
                         {
                             "event": "applied",
+                            "evaluation_id": evaluation_id,
+                            "apply_publish_seconds": time.perf_counter() - apply_started,
                             "step": step,
                             "candidate_id": candidate_id,
                             "policy": asdict(policy_version),

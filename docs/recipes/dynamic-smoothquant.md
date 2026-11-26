@@ -4,6 +4,12 @@
 
 Choose which `mlp.down_proj` layers run in low precision, then choose which of those layers start with SmoothQuant, when to recalibrate, and who may approve new per-channel smoothing factors (`S`). This guide uses the default MXFP8 format. Experimental NVFP4 follows the same layer-selection and calibration rules. The native implementation targets a single-rank dense Qwen3 with a Megatron/Transformer Engine learner and vLLM for rollout. The original SmoothQuant work calibrates INT8 inference offline. QoreRL applies channel scaling during training. Local CPU tests exercise calibration, decisions, and publication. Native GPU execution, overhead, and training quality still await validation. [SmoothQuant paper](https://arxiv.org/abs/2211.10438)
 
+## Inspect calibration and prepare GPU acceptance
+
+The calibration viewer reuses these saved comparisons and links approvals across run segments. It shows one evaluation window at a time, including candidates that did not qualify. [View and export calibration evidence](../recipe-insights.md#smoothquant-reuse-calibration-evidence).
+
+For a single B200, start with [`grpo_single_gpu_smoothquant.json`](../../configs/grpo_single_gpu_smoothquant.json): Qwen3-1.7B, one collocated rollout worker, microbatch 1 and manual calibration every 20 actual updates. Use `gpu-preflight` before loading and `validate-run` after a completed segment. The [GPU validation guide](../gpu-validation.md) covers commands, evidence, explicit thresholds and remaining checks. Hardware execution remains unvalidated; H200 cannot run this native MXFP8 path.
+
 ## Choose where to start
 
 With `recipe_id: "smoothquant-mlp-down-v1"`, `recipe_options.layers` fixes the low-precision layer set. `recipe_options.smoothquant_layers` selects the subset that starts with SmoothQuant. Both use zero-based decoder layer indices for `mlp.down_proj`. Omitting `layers` selects every supported layer. Omitting `smoothquant_layers` enables S on every selected layer. To start all selected layers in direct MXFP8 and allow later proposals, set `smoothquant_layers: []` and `allow_layer_expansion: true`. Native BF16, direct MXFP8 and fixed Hadamard MXFP8 runs can also collect outlier evidence.

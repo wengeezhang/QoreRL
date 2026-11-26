@@ -127,8 +127,11 @@ def test_uneven_microbatches_preserve_update_and_checkpoint():
     batch = example_batch()
     full = CPULearner(cpu_config(micro_batch_size=4))
     split = CPULearner(cpu_config(micro_batch_size=3))
-    full.update(batch)
-    split.update(batch)
+    full_metrics = full.update(batch)
+    split_metrics = split.update(batch)
+    assert split_metrics["pre_update_abs_log_ratio_max"] == pytest.approx(
+        full_metrics["pre_update_abs_log_ratio_max"]
+    )
     for a, b in zip(full.master_parameters, split.master_parameters, strict=True):
         torch.testing.assert_close(a, b, atol=1e-7, rtol=1e-6)
     restored = CPULearner(cpu_config(micro_batch_size=4))
@@ -160,6 +163,7 @@ def test_pre_update_diagnostics_do_not_include_later_policy_updates():
     for key in ("ratio_mean", "abs_log_ratio_mean", "clip_fraction"):
         assert both[f"pre_update_{key}"] == first[key]
     assert both["optimizer_steps"] == 2
+    assert both["pre_update_abs_log_ratio_max"] == first["pre_update_abs_log_ratio_max"]
     assert both["ratio_mean"] != both["pre_update_ratio_mean"]
 
 
@@ -200,6 +204,16 @@ def test_ppo_only_clips_the_advantage_improving_side():
     assert torch.count_nonzero(logits.grad[:2]) == 0
     assert logits.grad[2:].abs().sum() > 0
     assert stats["clipped_tokens"] == 3
+
+
+def test_max_logprob_gap_excludes_prompt_and_padding():
+    microbatch = collate_microbatch(example_batch(), [0, 1, 2, 3], 0, "cpu")
+    logits = torch.zeros(*microbatch.labels.shape, 14)
+    microbatch.behavior_log_probs.fill_(-math.log(14))
+    microbatch.behavior_log_probs[~microbatch.response_mask] = -1000
+    microbatch.behavior_log_probs[0, microbatch.response_mask[0]] -= 2
+    _, stats = grpo_loss(logits, microbatch, 0.2)
+    assert stats["abs_log_ratio_max"] == pytest.approx(2)
 
 
 @pytest.mark.parametrize(

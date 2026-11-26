@@ -8,6 +8,25 @@ Recipe Insights 在真实 learner 计算中截取少量输入和当前权重，�
 
 上图使用合成数据展示界面，不是 GPU 测量或训练收益证据。
 
+## SmoothQuant：复用已有校准证据
+
+SmoothQuant 展示直接读取 `calibration.jsonl`，不增加额外探针或前向回放。运行 `qorerl inspect --run RUN` 或 `qorerl report --run RUN --out report.html` 即可自动进入校准视图。不要为 SmoothQuant 开启原有固定方法的 `recipe_observation` 探针。其他 recipe 同时记录探针与发现证据时，可用 `--view probes` 或 `--view calibration` 显式选择，原有探针数据仍然可查看。
+
+![真实 CPU 模拟校准导出图，并非原生 GPU 证据](assets/smoothquant-calibration-cpu.png)
+
+这张图来自 CPU 人工审核流程测试：第 0 层候选通过，第 1 层变差而未应用，第 2 层未选中。摘要比较的是**全部完整候选对**，包含未通过的比较，不是最终应用组合的整体收益；耗时也只属于这次微型 CPU 运行。
+
+选择一个校准窗口，可以查看同一权重版本、同一留出输入下的当前/候选误差、outlier 分数、`refresh` 或首次 `activate`，以及独立的批准和发布状态。缺失数据不会补成零，不同权重版本不会混在一次比较里。评估出候选，不代表已经修改训练。
+
+人工恢复后，显式关联之前的运行目录：
+
+```bash
+qorerl inspect --run results/sq-accepted --related-run results/sq-review
+qorerl report --run results/sq-accepted --related-run results/sq-review --out results/sq-report.html
+```
+
+新增可选 `evaluation_id` 串联评估、保存的候选与决策；兼容旧日志中的 candidate ID 和本段评估边界。关联多条恢复分支时，分别展示结果。`evaluation_seconds` 表示校准墙钟耗时，`apply_publish_seconds` 表示批准后的应用与发布耗时，两者都不是算子延迟或 FLOPs 节省。页面区分 CPU 模拟、原生配置和来源未知；GPU 验证单独进行。[GPU 实验与验收工具](gpu-validation.zh-CN.md)
+
 ## 启用真实观测
 
 在已配置 CUDA 依赖的环境中，将以下配置保存为 `configs/grpo_mxfp8_observed.json`。未列出的训练参数采用 `TrainConfig` 默认值；原生环境与硬件要求见 [recipe 说明](recipes/mxfp8-hadamard.zh-CN.md)。

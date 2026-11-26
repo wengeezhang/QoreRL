@@ -8,6 +8,25 @@ Recipe Insights captures a small sample of real learner inputs and the current w
 
 The preview uses synthetic data to illustrate the interface.
 
+## SmoothQuant: reuse calibration evidence
+
+SmoothQuant has its own view of the existing `calibration.jsonl`. No extra probe or forward replay is needed. Use `qorerl inspect --run RUN` or `qorerl report --run RUN --out report.html`; the viewer chooses calibration for a SmoothQuant run. Do not enable the fixed-method `recipe_observation` probe for SmoothQuant. If another recipe records both probes and discovery, select `--view probes` or `--view calibration` explicitly; existing probe data remains accessible.
+
+![SmoothQuant calibration view from a real CPU simulation; not native GPU evidence](assets/smoothquant-calibration-cpu.png)
+
+This export comes from the CPU manual-review test: layer 0 qualifies, layer 1 gets worse and is not applied, and layer 2 is not selected. The summary compares **all complete candidate pairs**, including rejected comparisons; it is not the improvement of the applied combination. The time shown belongs to this tiny CPU run.
+
+Choose one calibration window to compare current and proposed outputs against the same local BF16 reference, inspect outlier scores, and see `refresh` versus first `activate`. Missing comparisons stay empty. Approval/publication is a separate status; a candidate evaluation alone is not an applied change. The view never merges weight versions into one comparison.
+
+After manual resume, supply the earlier run explicitly:
+
+```bash
+qorerl inspect --run results/sq-accepted --related-run results/sq-review
+qorerl report --run results/sq-accepted --related-run results/sq-review --out results/sq-report.html
+```
+
+The optional `evaluation_id` joins evaluation, saved candidate and decision across run segments. Older logs use a matching candidate ID and same-run evaluation boundary. Supplying several branches shows their separate outcomes. `evaluation_seconds` is calibration wall time; `apply_publish_seconds` covers applying the approved candidate and publishing it. Neither measures operator latency or FLOP savings. CPU, native-configured and unknown execution sources are labeled separately; native GPU validation remains a separate check. [GPU experiment and acceptance tools](gpu-validation.md)
+
 ## Collect measurements
 
 In an environment with the native CUDA dependencies installed, save the following as `configs/grpo_mxfp8_observed.json`. Omitted training settings take their `TrainConfig` defaults. See the [recipe and hardware requirements](recipes/mxfp8-hadamard.md).

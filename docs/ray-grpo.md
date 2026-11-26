@@ -185,6 +185,8 @@ At GPU validation, use identical weights to compare learner and rollout log-prob
 
 ### GPU acceptance checks
 
+Use the [GPU preflight and smoke-audit tools](gpu-validation.md) to record prerequisites and check saved run evidence. They do not replace the numerical, recovery and quality checks below.
+
 1. Load one snapshot on both engines. Compare behavior and training log-probabilities on matched tokens, check for nonfinite values, and inspect the error distribution.
 2. Run at least two optimizer updates and refits. Confirm that the update count advanced, the weight contents changed, and log-probabilities after publication correspond to the new weights.
 3. Use groups containing both correct and incorrect responses. Verify nonzero advantages and useful gradients.

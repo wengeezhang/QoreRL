@@ -175,6 +175,7 @@ class SingleRankGRPOLearner:
         last_norm = 0.0
         active = bool(batch.advantages.count_nonzero())
         pre_update = dict(ratio_sum=0.0, abs_log_ratio_sum=0.0, clipped_tokens=0, tokens=0)
+        pre_update_max = 0.0
         probe = getattr(self, "recipe_probe", None)
         observations, probe_seconds = [], 0.0
         if probe is not None:
@@ -195,6 +196,7 @@ class SingleRankGRPOLearner:
                     # recorded tokens isolate engine mismatch from policy learning.
                     for key in pre_update:
                         pre_update[key] += stats[key]
+                    pre_update_max = max(pre_update_max, stats["abs_log_ratio_max"])
                 fraction = len(indices) / count
                 # Do not average microbatch means equally: the last may be smaller.
                 if active:
@@ -240,6 +242,7 @@ class SingleRankGRPOLearner:
             "clip_fraction": sums["clipped_tokens"] / tokens,
             "pre_update_ratio_mean": pre_update["ratio_sum"] / pre_update["tokens"],
             "pre_update_abs_log_ratio_mean": pre_update["abs_log_ratio_sum"] / pre_update["tokens"],
+            "pre_update_abs_log_ratio_max": pre_update_max,
             "pre_update_clip_fraction": pre_update["clipped_tokens"] / pre_update["tokens"],
             "gradient_norm": last_norm,
             "optimizer_steps": self.optimizer_steps,
