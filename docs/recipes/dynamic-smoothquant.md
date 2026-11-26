@@ -6,6 +6,8 @@ Choose which `mlp.down_proj` layers run in low precision, then choose which of t
 
 ## Inspect calibration and prepare GPU acceptance
 
+For the code-level path from activation capture to persisted evidence and charts, see [SmoothQuant calibration: from training inputs to a visible decision](../smoothquant-calibration.md).
+
 The calibration viewer reuses these saved comparisons and links approvals across run segments. It shows one evaluation window at a time, including candidates that did not qualify. [View and export calibration evidence](../recipe-insights.md#smoothquant-reuse-calibration-evidence).
 
 For a single B200, start with [`grpo_single_gpu_smoothquant.json`](../../configs/grpo_single_gpu_smoothquant.json): Qwen3-1.7B, one collocated rollout worker, microbatch 1 and manual calibration every 20 actual updates. Use `gpu-preflight` before loading and `validate-run` after a completed segment. The [GPU validation guide](../gpu-validation.md) covers commands, evidence, explicit thresholds and remaining checks. Hardware execution remains unvalidated; H200 cannot run this native MXFP8 path.

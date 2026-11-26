@@ -10,6 +10,8 @@ Recipe Insights 在真实 learner 计算中截取少量输入和当前权重，�
 
 ## SmoothQuant：复用已有校准证据
 
+输入怎样采集、候选怎样拟合与比较、数据怎样写入文件，以及决策关联和图表导出的完整实现，见 [SmoothQuant 校准：从训练输入到可见的决策](smoothquant-calibration.zh-CN.md)。
+
 SmoothQuant 展示直接读取 `calibration.jsonl`，不增加额外探针或前向回放。运行 `qorerl inspect --run RUN` 或 `qorerl report --run RUN --out report.html` 即可自动进入校准视图。不要为 SmoothQuant 开启原有固定方法的 `recipe_observation` 探针。其他 recipe 同时记录探针与发现证据时，可用 `--view probes` 或 `--view calibration` 显式选择，原有探针数据仍然可查看。
 
 ![真实 CPU 模拟校准导出图，并非原生 GPU 证据](assets/smoothquant-calibration-cpu.png)

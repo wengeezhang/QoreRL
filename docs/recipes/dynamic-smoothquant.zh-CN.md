@@ -6,6 +6,8 @@
 
 ## 查看校准并准备 GPU 验收
 
+从激活采集、候选评估到证据落盘和图表展示的代码链路，见 [SmoothQuant 校准：从训练输入到可见的决策](../smoothquant-calibration.zh-CN.md)。
+
 校准展示直接复用已有比较记录，关联不同运行段的审批和发布；每次查看一个窗口，保留未通过的候选。[查看和导出校准证据](../recipe-insights.zh-CN.md#smoothquant复用已有校准证据)。
 
 单张 B200 可以从 [`grpo_single_gpu_smoothquant.json`](../../configs/grpo_single_gpu_smoothquant.json) 开始：Qwen3-1.7B、一个共置 rollout worker、microbatch=1，每 20 次实际更新进行人工校准。加载前运行 `gpu-preflight`，完整训练段结束后运行 `validate-run`。[GPU 验收指南](../gpu-validation.zh-CN.md) 说明命令、证据、阈值和仍需验证的内容。原生 GPU 尚未验证；H200 无法执行当前原生 MXFP8 路径。

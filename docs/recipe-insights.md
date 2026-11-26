@@ -10,6 +10,8 @@ The preview uses synthetic data to illustrate the interface.
 
 ## SmoothQuant: reuse calibration evidence
 
+For the full implementation path—collecting inputs, fitting and validating candidates, writing files, linking decisions and rendering/exporting charts—see [SmoothQuant calibration: from training inputs to a visible decision](smoothquant-calibration.md).
+
 SmoothQuant has its own view of the existing `calibration.jsonl`. No extra probe or forward replay is needed. Use `qorerl inspect --run RUN` or `qorerl report --run RUN --out report.html`; the viewer chooses calibration for a SmoothQuant run. Do not enable the fixed-method `recipe_observation` probe for SmoothQuant. If another recipe records both probes and discovery, select `--view probes` or `--view calibration` explicitly; existing probe data remains accessible.
 
 ![SmoothQuant calibration view from a real CPU simulation; not native GPU evidence](assets/smoothquant-calibration-cpu.png)
