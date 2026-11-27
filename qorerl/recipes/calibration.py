@@ -7,6 +7,19 @@ from dataclasses import dataclass
 import torch
 
 
+class NonfiniteLogits(ValueError):
+    """A numerical replay failure, distinct from an execution/backend exception."""
+
+
+@dataclass
+class CandidatePreparation:
+    """Recipe payload and evidence, including an optional joint model comparison."""
+
+    candidate: dict | None
+    evidence: list
+    comparison: dict | None = None
+
+
 @dataclass(frozen=True)
 class CalibrationConfig:
     refresh_every_optimizer_steps: int = 20
@@ -19,8 +32,18 @@ class CalibrationConfig:
     min_relative_improvement: float = 0.0
     initial_artifact: str | None = None
     max_activation_relative_l2: float | None = None
+    evaluation_scope: str = "local"
+    max_logits_relative_l2: float | None = None
 
     def __post_init__(self):
+        if self.evaluation_scope not in ("local", "model_logits"):
+            raise ValueError("evaluation_scope must be local or model_logits")
+        if self.evaluation_scope == "model_logits" and self.discovery_only:
+            raise ValueError("model_logits requires candidate evaluation, not discovery_only")
+        if self.evaluation_scope == "model_logits" and self.max_activation_relative_l2 is not None:
+            raise ValueError("model_logits uses max_logits_relative_l2, not max_activation_relative_l2")
+        if self.evaluation_scope == "local" and self.max_logits_relative_l2 is not None:
+            raise ValueError("max_logits_relative_l2 requires model_logits evaluation")
         if type(self.refresh_every_optimizer_steps) is not int or self.refresh_every_optimizer_steps < 0:
             raise ValueError("refresh_every_optimizer_steps must be a nonnegative integer")
         if self.initial_artifact is not None and (
@@ -48,6 +71,9 @@ class CalibrationConfig:
         bound = self.max_activation_relative_l2
         if bound is not None and (type(bound) not in (int, float) or not math.isfinite(bound) or bound < 0):
             raise ValueError("max_activation_relative_l2 must be a finite nonnegative number or None")
+        bound = self.max_logits_relative_l2
+        if bound is not None and (type(bound) not in (int, float) or not math.isfinite(bound) or bound < 0):
+            raise ValueError("max_logits_relative_l2 must be a finite nonnegative number or None")
 
     @classmethod
     def from_dict(cls, options):

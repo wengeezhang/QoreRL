@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from qorerl.observability.viewer import _html, export_report, load_report
 
 
@@ -63,6 +65,61 @@ def make_run(root, name):
         )
     )
     return path
+
+
+def model_evaluation():
+    event = evaluation()
+    event["evidence"][0].update(current_relative_l2=None, candidate_relative_l2=None)
+    event["comparison"] = {
+        "scope": "model_logits",
+        "reference": "full_model_bf16",
+        "activation_source": "full_model_bf16",
+        "reference_execution": "cpu_fixture",
+        "status": "proposed",
+        "reason": None,
+        "fit_rows": 100,
+        "heldout_rows": 20,
+        "current_relative_l2": 0.08,
+        "candidate_relative_l2": 0.04,
+        "min_relative_improvement": 0.1,
+        "max_logits_relative_l2": None,
+        "targets": [event["evidence"][0]["target"]],
+    }
+    return event
+
+
+def test_model_comparison_has_one_logits_pair_and_separate_layer_discovery(tmp_path):
+    run = make_run(tmp_path, "model")
+    log(run / "calibration.jsonl", model_evaluation())
+    report = load_report(run)
+    [window] = report["calibration"]["evaluations"]
+    assert not report["warnings"]
+    assert window["comparison"]["relative_improvement"] == 0.5
+    assert all(row["relative_improvement"] is None for row in window["evidence"])
+    html = _html(report, live=False)
+    assert "Final-logits error change" in html
+    assert "model_logits" in html and "cpu_fixture" in html
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"candidate_relative_l2": 0.09},
+        {"candidate_relative_l2": float("nan")},
+        {"max_logits_relative_l2": 0.01},
+        {"reference_execution": "unknown"},
+        {"heldout_rows": 0},
+        {"targets": []},
+    ],
+)
+def test_malformed_or_unqualified_model_evidence_cannot_claim_success(tmp_path, updates):
+    run = make_run(tmp_path, "model")
+    event = model_evaluation()
+    event["comparison"].update(updates)
+    log(run / "calibration.jsonl", event)
+    report = load_report(run)
+    assert report["warnings"]
+    assert not report["calibration"]["evaluations"]
 
 
 def test_manual_resume_links_explicit_prior_runs_and_preserves_pairs(tmp_path):

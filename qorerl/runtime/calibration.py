@@ -6,13 +6,14 @@ from dataclasses import asdict
 from pathlib import Path
 
 
-def prepare_review(policy, optimizer_steps, candidate, evidence):
+def prepare_review(policy, optimizer_steps, candidate, evidence, *, comparison=None):
     return {
         "schema": 2,
         "source_policy": asdict(policy),
         "optimizer_steps": optimizer_steps,
         "candidate": candidate,
         "evidence": evidence,
+        **({"comparison": comparison} if comparison is not None else {}),
     }
 
 

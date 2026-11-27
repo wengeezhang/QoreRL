@@ -448,6 +448,13 @@ def validate_run(
                 and r["heldout_rows"]
                 for r in proposed
             )
+            comparison = evaluation.get("comparison")
+            if comparison is not None:
+                compared = (
+                    comparison["status"] == "proposed"
+                    and set(comparison["targets"]) == {r["target"] for r in proposed}
+                    and (evaluation["source"] != "native_gpu" or comparison["reference_execution"] == "bf16")
+                )
             changed = (
                 event["policy"]["weight_version"] == evaluation["policy"]["weight_version"]
                 and event["policy"]["recipe_id"] != evaluation["policy"]["recipe_id"]

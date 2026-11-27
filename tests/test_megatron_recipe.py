@@ -111,6 +111,37 @@ def megatron_stubs(monkeypatch):
 
 
 @pytest.mark.parametrize("wrapped", [False, True])
+def test_full_model_reference_restores_native_projection_paths(megatron_stubs, wrapped):
+    from qorerl.engines.calibration_replay import CalibrationReplay
+
+    raw = GPTModel()
+    model = Float16Module(raw) if wrapped else raw
+    reference = copy.deepcopy(model)
+    recipe = resolve_recipe(MXFP8_SMOOTHQUANT, {"layers": [0, 1], "smoothquant_layers": [1]})
+    installation = adapter.install(model, recipe, num_layers=2)
+    learner = SimpleNamespace(
+        cfg=SimpleNamespace(is_cpu_test=False),
+        model=model,
+        device="cpu",
+        recipe_installation=installation,
+        recipe_state=installation.state,
+        logits=lambda ids: model(F.one_hot(ids, 64).bfloat16()),
+    )
+    trajectory = SimpleNamespace(prompt_ids=[1, 2], response_ids=[3, 4, 5])
+    replay = CalibrationReplay(learner, [trajectory], 4)
+    samples, logits = replay.run(reference=True, collect_inputs=True)
+    expected = reference(F.one_hot(torch.tensor([[1, 2, 3, 4]]), 64).bfloat16())
+    torch.testing.assert_close(logits, expected[0, 2:].float())
+    assert set(samples) == {down_proj_name(1)}
+    assert not megatron_stubs.calls  # Both installed projections bypassed the low-precision kernel.
+    assert installation.calls == {down_proj_name(0): 0, down_proj_name(1): 0}
+    assert not installation.reference_mode
+    replay.run()
+    assert len(megatron_stubs.calls) == 2  # Original installed execution remains active afterwards.
+    assert installation.calls == {down_proj_name(0): 0, down_proj_name(1): 0}
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
 def test_install_discovers_selected_projection_and_preserves_canonical_state(megatron_stubs, wrapped):
     raw = GPTModel()
     model = Float16Module(raw) if wrapped else raw
@@ -386,7 +417,8 @@ def test_native_discovery_observes_existing_operator_and_removes_capture(megatro
     before = copy.deepcopy(model.state_dict())
     fc2s = [layer.mlp.linear_fc2 for layer in model.module.decoder.layers]
     forwards = [module.forward for module in fc2s]
-    candidate, evidence = learner.prepare_candidate(batch)
+    preparation = learner.prepare_candidate(batch)
+    candidate, evidence = preparation.candidate, preparation.evidence
     assert candidate is None and learner.policy_version == policy
     assert {e["target"] for e in evidence} == (
         {down_proj_name(1)} if cfg.recipe.is_mxfp8 else {down_proj_name(0), down_proj_name(1)}

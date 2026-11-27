@@ -86,7 +86,8 @@ def test_live_smoothquant_candidate_preserves_canonical_state_and_resumes_traini
             )
         with pytest.raises(ValueError, match="outside installed|eligible"):
             learner.apply_candidate(smoothing_artifact(cfg, {down_proj_name(2): torch.ones(32)}))
-    candidate, evidence = learner.prepare_candidate(batch)
+    preparation = learner.prepare_candidate(batch)
+    candidate, evidence = preparation.candidate, preparation.evidence
     proposals = candidate["scales"]
     assert name in proposals and down_proj_name(2) not in proposals
     assert {event["target"] for event in evidence} == set(learner.recipe_state.targets)
@@ -160,7 +161,7 @@ def test_fixed_overlay_observes_and_modifies_only_its_initial_subset(discovery_o
     )
     learner, rollout = make_learner_engine(cfg), make_rollout_engine(cfg)
     original = rollout.install_weights(learner.export_weights())
-    _, evidence = learner.prepare_candidate(sample(cfg, rollout, 1))
+    evidence = learner.prepare_candidate(sample(cfg, rollout, 1)).evidence
     assert [event["target"] for event in evidence] == [down_proj_name(1)]
     for index in (0, 2):
         with pytest.raises(ValueError):
@@ -179,7 +180,8 @@ def test_empty_initial_overlay_is_direct_until_a_candidate_is_approved(expand):
     batch = sample(cfg, rollout, 1)
     if not expand:
         learner.logits = lambda *_: pytest.fail("Empty observation scope triggered a forward pass")
-    candidate, evidence = learner.prepare_candidate(batch)
+    preparation = learner.prepare_candidate(batch)
+    candidate, evidence = preparation.candidate, preparation.evidence
     assert not learner.recipe_state.smoothing_factors
     if expand:
         assert all(event["action"] == "activate" for event in evidence)

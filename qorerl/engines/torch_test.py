@@ -46,7 +46,7 @@ class TestProjection(nn.Module):
         if installation.calibrator is not None and name in installation.weights:
             installation.calibrator.capture(name, x)
         state = installation.state
-        if name not in state.targets:
+        if installation.reference_mode or name not in state.targets:
             return self.down_proj(x)
         return installation.linear(
             state.transform_input(x, name), state.transform_weight(self.down_proj.weight, name)
@@ -74,7 +74,12 @@ class TestLM(nn.Module):
                     weight = layer.mlp.down_proj.weight
                     weights[state.add_target(index, weight)] = weight
             self.installation = SimpleNamespace(
-                state=state, weights=weights, calibrator=None, linear=_emulated_mxfp8_linear
+                state=state,
+                weights=weights,
+                calibrator=None,
+                linear=_emulated_mxfp8_linear,
+                reference_mode=False,
+                observer=None,
             )
 
     def forward(self, ids):

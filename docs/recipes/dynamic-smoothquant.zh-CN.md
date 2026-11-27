@@ -29,6 +29,9 @@
 
 ## 它拿什么来决定换 S
 
+支持两种 `recipe_calibration.evaluation_scope`：默认 `local` 是下面介绍的逐投影工具；`model_logits` 则用整模型 BF16 激活发现 outlier、拟合一组 S，再将当前与完整候选各自完整前向，与 BF16 logits 比较。新模式不使用局部误差预筛，只有整组通过才进入审核。使用 [CPU 配置](../../configs/grpo_cpu_smoothquant_logits.json)或[单 GPU 配置](../../configs/grpo_single_gpu_smoothquant_logits.json)；[完整流程、数据与局限](../smoothquant-calibration.zh-CN.md)说明如何查看联合证据。GPU 验证尚未完成。
+
+
 1. learner 在刚完成更新的权重上，重放刚训练的轨迹前缀，收集所选层在变换前的输入 X。按前缀去重，排除 padding，每层最多保留 `max_rows` 行（默认 128）。输入行的前半用于拟合，后半留作比较。两个集合仍可能来自同一条回答。
 2. 每个输入通道 j 取拟合行上的最大绝对值 `x_max[j]`。发现分数为这些通道最大值中的最大值除以它们的平均值。默认阈值为 4。这个分数描述同一层内通道幅度的不均衡。
 3. 对入选层取权重第 j 列的绝对值最大值 `w_max[j]`，计算 `S[j] = x_max[j]^alpha / w_max[j]^(1-alpha)`，默认 alpha 为 0.5。前向用 `X/S` 和 `W*S` 做配套变换，W 的存储形状为 [out, in]。未观测到有效信号的通道沿用原平滑因子。新 S 是相对原始参数的绝对缩放，刷新时替换指定层的旧值。

@@ -116,8 +116,74 @@ def _evidence(row):
             raise ValueError(f"invalid {key}")
         result[key] = value
     # Compute the comparison from the paired values; never turn missing data into zero.
-    before, after = result["current_relative_l2"], result["candidate_relative_l2"]
-    result["relative_improvement"] = (before - after) / before if before and after is not None else None
+    current_relative_l2, candidate_relative_l2 = (
+        result["current_relative_l2"],
+        result["candidate_relative_l2"],
+    )
+    result["relative_improvement"] = (
+        (current_relative_l2 - candidate_relative_l2) / current_relative_l2
+        if current_relative_l2 and candidate_relative_l2 is not None
+        else None
+    )
+    return result
+
+
+def _comparison(value):
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("scope") != "model_logits"
+        or value.get("reference") != "full_model_bf16"
+        or value.get("activation_source") != "full_model_bf16"
+        or value.get("reference_execution") not in ("bf16", "cpu_fixture")
+    ):
+        raise ValueError("invalid full-model comparison scope or reference")
+    result = {key: value[key] for key in ("scope", "reference", "activation_source", "reference_execution")}
+    for key in ("status", "reason"):
+        item = value.get(key)
+        if item is not None and (not isinstance(item, str) or len(item) > 1000):
+            raise ValueError(f"invalid comparison {key}")
+        result[key] = item
+    if not result["status"]:
+        raise ValueError("missing comparison status")
+    for key in (
+        "fit_rows",
+        "heldout_rows",
+        "current_relative_l2",
+        "candidate_relative_l2",
+        "min_relative_improvement",
+        "max_logits_relative_l2",
+    ):
+        item = value.get(key)
+        if item is not None and not _number(item, integer=key.endswith("rows")):
+            raise ValueError(f"invalid comparison {key}")
+        result[key] = item
+    targets = value.get("targets")
+    if (
+        not isinstance(targets, list)
+        or len(targets) > 4096
+        or any(not isinstance(t, str) or not _TARGET.fullmatch(t) for t in targets)
+        or len(set(targets)) != len(targets)
+    ):
+        raise ValueError("invalid comparison targets")
+    result["targets"] = targets
+    current, candidate = result["current_relative_l2"], result["candidate_relative_l2"]
+    result["relative_improvement"] = (
+        (current - candidate) / current if current and candidate is not None else None
+    )
+    if result["status"] == "proposed" and not (
+        targets
+        and current is not None
+        and candidate is not None
+        and candidate < current
+        and result["fit_rows"]
+        and result["heldout_rows"]
+        and result["min_relative_improvement"] is not None
+        and result["relative_improvement"] >= result["min_relative_improvement"]
+        and (result["max_logits_relative_l2"] is None or candidate <= result["max_logits_relative_l2"])
+    ):
+        raise ValueError("proposed comparison did not pass the joint logits gate")
     return result
 
 
@@ -180,6 +246,7 @@ def load_calibration(run_dirs, warnings, *, tail=True):
                         evaluation_seconds=seconds,
                         sample_policy=_policy(raw["sample_policy"]) if "sample_policy" in raw else None,
                         evidence=rows,
+                        comparison=_comparison(raw.get("comparison")),
                         decisions=[],
                     )
                     evaluations.append(event)

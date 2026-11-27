@@ -1,0 +1,41 @@
+{
+  "learner_backend": "megatron",
+  "rollout_backend": "vllm",
+  "model": "Qwen/Qwen3-1.7B",
+  "model_revision": "main",
+  "steps": 60,
+  "prompts_per_step": 4,
+  "group_size": 4,
+  "micro_batch_size": 1,
+  "update_epochs": 1,
+  "learning_rate": 1e-06,
+  "max_new_tokens": 64,
+  "max_model_len": 512,
+  "rollout_workers": 1,
+  "checkpoint_every": 5,
+  "recipe_id": "smoothquant-mlp-down-v1",
+  "recipe_options": {
+    "precision": "mxfp8",
+    "layers": [
+      7,
+      15,
+      20,
+      25
+    ],
+    "smoothquant_layers": [
+      7,
+      15,
+      20
+    ],
+    "allow_layer_expansion": true
+  },
+  "recipe_calibration": {
+    "refresh_every_optimizer_steps": 20,
+    "discover_outliers": true,
+    "approval": "manual",
+    "evaluation_scope": "model_logits",
+    "max_logits_relative_l2": null
+  },
+  "worker_placement": "collocate",
+  "gpu_memory_utilization": 0.2
+}

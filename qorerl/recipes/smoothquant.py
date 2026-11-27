@@ -197,28 +197,38 @@ def prepare_smoothquant_candidate(
                 continue
             if activating:
                 try:
-                    before = _measure_output_relative_l2(fprop, heldout, weight, None, reference, norm)
+                    current_relative_l2 = _measure_output_relative_l2(
+                        fprop, heldout, weight, None, reference, norm
+                    )
                 except _NonfiniteProjection as exc:
                     event.update(status="invalid_candidate", reason=f"Direct low precision: {exc}")
                     continue
-                event["direct_low_precision_relative_l2"] = before
+                event["direct_low_precision_relative_l2"] = current_relative_l2
             else:
-                before = _measure_output_relative_l2(fprop, heldout, weight, current_factor, reference, norm)
-            event["current_relative_l2"] = before
+                current_relative_l2 = _measure_output_relative_l2(
+                    fprop, heldout, weight, current_factor, reference, norm
+                )
+            event["current_relative_l2"] = current_relative_l2
             candidate_factor = _fit_smoothing_factor(maxima, weight, current_factor, config.alpha)
             if not torch.isfinite(candidate_factor).all().item() or not (candidate_factor > 0).all().item():
                 event.update(status="invalid_candidate", reason="scale_outside_positive_fp32_range")
                 continue
             try:
-                after = _measure_output_relative_l2(fprop, heldout, weight, candidate_factor, reference, norm)
+                candidate_relative_l2 = _measure_output_relative_l2(
+                    fprop, heldout, weight, candidate_factor, reference, norm
+                )
             except _NonfiniteProjection as exc:
                 event.update(status="invalid_candidate", reason=str(exc))
                 continue
-        event["candidate_relative_l2"] = after
-        improvement = (before - after) / before if before > 0 else None
+        event["candidate_relative_l2"] = candidate_relative_l2
+        improvement = (
+            (current_relative_l2 - candidate_relative_l2) / current_relative_l2
+            if current_relative_l2 > 0
+            else None
+        )
         event["relative_improvement"] = improvement
         if (
-            after >= before
+            candidate_relative_l2 >= current_relative_l2
             or improvement < config.min_relative_improvement
             or torch.equal(candidate_factor, current_factor)
         ):
@@ -227,7 +237,7 @@ def prepare_smoothquant_candidate(
         if (
             activating
             and config.max_activation_relative_l2 is not None
-            and after > config.max_activation_relative_l2
+            and candidate_relative_l2 > config.max_activation_relative_l2
         ):
             event.update(status="activation_cost_exceeded", reason="above_max_activation_relative_l2")
             continue
@@ -265,6 +275,13 @@ def prepare_candidate(cfg, state, installation, samples):
         smoothing_factors, model=cfg.model, model_revision=cfg.model_revision, recipe_id=state.spec.identity
     )
     return artifact, evidence
+
+
+def prepare_model_candidate(cfg, state, installation, replay):
+    """Fit from the canonical model and qualify the complete combination by logits."""
+    from qorerl.recipes.smoothquant_model import prepare_candidate
+
+    return prepare_candidate(cfg, state, installation, replay)
 
 
 def apply_candidate(cfg, state, artifact, *, initial=False):

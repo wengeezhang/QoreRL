@@ -189,6 +189,8 @@ A user with known targets can bypass outlier screening for refreshes on active l
 
 <a id="cpu-run"></a>
 
+For `evaluation_scope: "model_logits"`, the same learner method constructs [`CalibrationReplay`](qorerl/engines/calibration_replay.py) and dispatches to `handler.prepare_model_candidate`. [`smoothquant_model`](qorerl/recipes/smoothquant_model.py) owns BF16-input fitting and the joint logits gate. The replay engine owns provisional execution and restoration; it does not choose factors. Both scopes return `CandidatePreparation(candidate, evidence, comparison)`. `comparison` is optional model-level evidence that the driver records and binds to review alongside the artifact. The existing local call path above remains the default. [Complete calibration walkthrough](docs/smoothquant-calibration.md)
+
 ## 7. Trace an actual review on CPU
 
 From the repository root, the following config runs one learner and two rollout replicas. Use fresh output directories. The first command prints the checkpoint path and candidate ID used by the second command. [CPU config](configs/grpo_cpu_smoothquant.json) · [CPU engines](qorerl/engines/torch_test.py) · [Workflow tests](tests/test_calibration_workflow.py)
@@ -370,6 +372,8 @@ Driver 创建一个 `RayLearnerWorker` 和配置数量的 `RayRolloutWorker`，�
 用户可以从不同环节进入这条链路。已知要刷新哪些层时可跳过已启用层的 outlier 筛选，直接在这些层拟合并比较。首次向新层扩展仍需发现 outlier。已有兼容的离线 S 时，可以通过 `recipe_calibration.initial_artifact` 在初次发布前导入，并把刷新周期设为 0 来固定使用。[校准选项](qorerl/recipes/calibration.py#L11) · [启动时应用](qorerl/recipes/smoothquant.py#L269)
 
 另外还有独立的 **Recipe Insights**。在支持的直接 MXFP8 和固定 Hadamard MXFP8 配置中，它在第一个 microbatch 捕获变换前的 X 和 W，在权重更新前，用相同操作数比较 BF16、直接 MXFP8、MXFP8 加固定 Hadamard，写入 `recipe_metrics.jsonl`。运行中的逐层图和导出的 HTML 从这里读数据。校准发生在常规发布之后，可以提出变更。Insights 给出的则是单个算子的误差与耗时。端到端训练速度、奖励和收敛仍要单独测量。[观测探针](qorerl/observability/probe.py#L138) · [图表与指标](docs/recipe-insights.zh-CN.md)
+
+设置 `evaluation_scope: "model_logits"` 后，同一个 learner 入口构造 [`CalibrationReplay`](qorerl/engines/calibration_replay.py)，调用 `handler.prepare_model_candidate`。[`smoothquant_model`](qorerl/recipes/smoothquant_model.py) 负责基于 BF16 输入的拟合和整组 logits 判定；重放引擎只负责临时执行、恢复状态，不决定 S。两条路径都返回 `CandidatePreparation(candidate, evidence, comparison)`；可选的 `comparison` 是整模型证据，由 driver 与 artifact 一起写入日志和审核。上面的局部流程仍是默认模式。[完整校准解读](docs/smoothquant-calibration.zh-CN.md)
 
 ### 7. 用一份运行记录对照源码
 

@@ -29,6 +29,9 @@ For example, select `recipe_id: "bf16-baseline-v1"` and add `"recipe_calibration
 
 ## How the learner evaluates new smoothing factors
 
+Two `recipe_calibration.evaluation_scope` values are supported. Default `local` is the projection-level tool described below. Opt-in `model_logits` discovers outliers and fits factors from full-model BF16 activations, then compares current and complete candidate logits against BF16. It applies no local-error prefilter: only a jointly qualifying combination enters review. Use the [CPU config](../../configs/grpo_cpu_smoothquant_logits.json) or [single-GPU config](../../configs/grpo_single_gpu_smoothquant_logits.json); see the [workflow, evidence and limitations](../smoothquant-calibration.md). Native GPU validation is pending.
+
+
 1. After an update, the learner replays the trajectory prefixes from the batch it just trained on. It deduplicates prefixes, excludes padding, and captures the input X before transformation, up to `max_rows` per selected layer (default 128). The first half of the rows is used for fitting and the rest for evaluation. Both halves may contain tokens from the same response.
 2. For each input channel `j`, take the largest absolute value over fitting rows, `x_max[j]`. The discovery score is the largest channel maximum divided by the mean of the channel maxima. Its default threshold is 4. The score describes variation in channel magnitudes within a layer.
 3. For selected layers, take the maximum absolute weight in column `j`, called `w_max[j]`. Fit `S[j] = x_max[j]^alpha / w_max[j]^(1-alpha)` with default `alpha = 0.5`. The forward pass pairs `X/S` with `W*S` for W stored as `[out, in]`. Channels with no usable signal keep their existing factor. Refresh replaces the layer's factors with absolute values relative to its canonical weights.

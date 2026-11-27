@@ -40,6 +40,65 @@ def cluster():
         ray.shutdown()
 
 
+def test_joint_logits_candidate_review_publication_and_evidence(tmp_path, cluster):
+    cfg = TrainConfig.load(CONFIG)
+    cfg = replace(
+        cfg, steps=1, recipe_calibration={**cfg.recipe_calibration, "evaluation_scope": "model_logits"}
+    )
+    paused = run_sync_grpo(cfg, tmp_path / "paused")
+    assert paused["status"] == "awaiting_review"
+    checkpoint = Path(paused["checkpoint"])
+    review = json.loads((checkpoint / "candidate.json").read_text())
+    comparison = review["comparison"]
+    assert comparison["status"] == "proposed" and comparison["scope"] == "model_logits"
+    assert comparison["reference_execution"] == "cpu_fixture"
+    assert set(comparison["targets"]) == set(review["candidate"]["scales"])
+    assert len(comparison["targets"]) == 2
+    assert all(row["current_relative_l2"] is None for row in review["evidence"])
+    accepted = run_sync_grpo(
+        replace(cfg, steps=2),
+        tmp_path / "accepted",
+        resume=checkpoint,
+        accept_candidate=paused["candidate_id"],
+    )
+    applied = events(tmp_path / "accepted/calibration.jsonl")[0]
+    trajectories = events(tmp_path / "accepted/trajectories.jsonl")[0]["trajectories"]
+    assert applied["event"] == "applied"
+    assert applied["policy"]["weight_version"] == paused["policy_version"]["weight_version"]
+    assert applied["policy"]["recipe_id"] != paused["policy_version"]["recipe_id"]
+    assert all(t["policy_version"] == applied["policy"] for t in trajectories)
+    report = load_report(tmp_path / "accepted", related_runs=[tmp_path / "paused"])
+    assert not report["warnings"]
+    first = report["calibration"]["evaluations"][0]
+    assert first["comparison"] == comparison and first["decision"] == "applied"
+    audit = validate_run(tmp_path / "accepted", related_runs=[tmp_path / "paused"], require_calibration=True)
+    checks = {item["name"]: item["status"] for item in audit["checks"]}
+    assert checks["calibration_apply_and_continue"] == "pass"
+    assert checks["native_execution"] == "fail" and audit["result"] == "failed"
+    auto = run_sync_grpo(
+        replace(cfg, steps=2, recipe_calibration={**cfg.recipe_calibration, "approval": "auto"}),
+        tmp_path / "auto",
+    )
+    if accepted["status"] == "awaiting_review":
+        # The second batch may propose another jointly improving combination.
+        # Resolve that final-boundary decision to compare with the auto path.
+        accepted = run_sync_grpo(
+            replace(cfg, steps=2),
+            tmp_path / "accepted-final",
+            resume=accepted["checkpoint"],
+            accept_candidate=accepted["candidate_id"],
+        )
+    assert auto["status"] == accepted["status"]
+    assert auto["policy_version"] == accepted["policy_version"]
+    assert events(tmp_path / "auto/trajectories.jsonl")[1]["trajectories"] == trajectories
+    for key in ("model", "master_parameters", "optimizer", "optimizer_steps"):
+        a, b = [
+            torch.load(Path(run["checkpoint"]) / "learner.pt", weights_only=True)[key]
+            for run in (auto, accepted)
+        ]
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("expand", [False, True], ids=["fixed-scope", "first-activation"])
 def test_reviewed_change_and_auto_apply_yield_the_same_continuation(tmp_path, cluster, expand):
     options = (

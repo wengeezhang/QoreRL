@@ -249,9 +249,8 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                 completed_updates, metrics["optimizer_steps"], calibration.refresh_every_optimizer_steps
             ):
                 evaluation_start = time.perf_counter()
-                candidate, evidence = ray.get(
-                    learner.prepare_candidate.remote(batch_ref), timeout=cfg.rpc_timeout
-                )
+                preparation = ray.get(learner.prepare_candidate.remote(batch_ref), timeout=cfg.rpc_timeout)
+                candidate, evidence = preparation.candidate, preparation.evidence
                 evaluation_id = uuid.uuid4().hex
                 append_json(
                     event_log,
@@ -264,10 +263,21 @@ def run_sync_grpo(cfg, output, *, address=None, resume=None, accept_candidate=No
                         "sample_policy": asdict(batch.policy_version),
                         "evaluation_seconds": time.perf_counter() - evaluation_start,
                         "evidence": evidence,
+                        **(
+                            {"comparison": preparation.comparison}
+                            if preparation.comparison is not None
+                            else {}
+                        ),
                     },
                 )
                 if candidate is not None:
-                    review = prepare_review(policy_version, metrics["optimizer_steps"], candidate, evidence)
+                    review = prepare_review(
+                        policy_version,
+                        metrics["optimizer_steps"],
+                        candidate,
+                        evidence,
+                        comparison=preparation.comparison,
+                    )
                     review["evaluation_id"] = evaluation_id
                     last_checkpoint = save_checkpoint(
                         directory, learner, cfg, step, policy_version, review=review

@@ -6,6 +6,13 @@ QoreRL separates three responsibilities: **the learner and recipe produce calibr
 
 This document follows the current implementation through those three responsibilities. For recipe choices and hardware setup, see the [SmoothQuant guide](recipes/dynamic-smoothquant.md). For native experiment acceptance, see [GPU validation](gpu-validation.md). The walkthrough below uses real CPU training and quantization simulation, not native GPU measurements.
 
+Two evaluation scopes share the same review and publication workflow:
+
+| `recipe_calibration.evaluation_scope` | Fitting inputs | Acceptance measurement |
+| --- | --- | --- |
+| `local` (default) | Captured under the active recipe | Each projection compared with its own local BF16 output; a diagnostic tool |
+| `model_logits` (opt-in) | Captured during full-model BF16 replay | The complete fitted combination compared with the current recipe, both against full-model BF16 logits |
+
 ## 1. The complete path
 
 ```mermaid
@@ -14,13 +21,13 @@ flowchart TD
     B -->|No| NEXT[Next training batch]
     B -->|Yes| C
     subgraph COMPUTE[1 · Produce evidence — learner and recipe]
-        C[Replay distinct token prefixes<br/>Current weights + active recipe<br/>Capture inputs before the local transform]
+        C[Replay distinct token prefixes<br/>Current weights + selected evaluation scope<br/>Capture inputs before the local transform]
         C --> D[Discover outliers on fitting rows<br/>Fit candidate smoothing factors S]
-        D --> E[Compare current and candidate<br/>on held-out rows against local BF16]
+        D --> E[Compare current and candidate<br/>on held-out rows<br/>Local outputs OR full-model logits]
     end
     E --> F
     subgraph RECORD[2 · Record and decide — driver]
-        F[Append evaluated + per-layer evidence<br/>to calibration.jsonl]
+        F[Append evaluated + comparison evidence<br/>to calibration.jsonl]
         F --> G{Any qualifying candidate?}
         G -->|Yes| H[Save pre-change checkpoint<br/>candidate.json + metadata.json + learner.pt]
         H --> I{Manual or automatic decision}
@@ -83,7 +90,7 @@ The driver calls `crosses_interval(before, after, interval)` after the normal tr
 
 Relevant code: [configuration and shared discovery](../qorerl/recipes/calibration.py), [scope in RecipeState](../qorerl/recipes/state.py), [interval test](../qorerl/runtime/calibration.py), [driver](../qorerl/runtime/ray_runtime.py).
 
-### Collect inputs from the just-consumed batch
+### Local mode: collect inputs from the just-consumed batch
 
 `SingleRankGRPOLearner.prepare_candidate(batch)` validates the sample policy, collects inputs and dispatches to `RecipeSpec.candidate_handler`. SmoothQuant owns the fitting and application functions; the driver does not calculate S.
 
@@ -101,7 +108,7 @@ The driver records both `sample_policy` (the policy that generated the tokens) a
 
 Relevant code: [prefix replay and capture](../qorerl/engines/single_rank_learner.py), [native projection adapter](../qorerl/recipes/megatron_mxfp8.py), [recipe dispatch](../qorerl/recipes/spec.py).
 
-### Discover, fit and compare
+### Local mode: discover, fit and compare
 
 For each input channel j, fitting computes:
 
@@ -125,7 +132,7 @@ For a selected layer, all three evaluations share the **same held-out X and cano
 | Current configuration, `activate` | Direct low-precision forward, without SmoothQuant |
 | Candidate | The same low-precision kernel with `X_heldout / S_new` and `W * S_new` |
 
-The measured error is `||Y - Y_ref||₂ / ||Y_ref||₂`. A proposal requires strictly smaller candidate error, relative improvement `(before - after) / before >= min_relative_improvement`, and a factor vector that actually changes. First activation also requires outlier evidence and satisfies `max_activation_relative_l2` when configured. With `discover_outliers: false`, existing SmoothQuant targets bypass the outlier threshold, but newly activated targets still need to meet it.
+The measured error is `||Y - Y_ref||₂ / ||Y_ref||₂`. A proposal requires strictly smaller candidate error, relative improvement `(current_relative_l2 - candidate_relative_l2) / current_relative_l2 >= min_relative_improvement`, and a factor vector that actually changes. First activation also requires outlier evidence and satisfies `max_activation_relative_l2` when configured. With `discover_outliers: false`, existing SmoothQuant targets bypass the outlier threshold, but newly activated targets still need to meet it.
 
 `prepare_smoothquant_candidate` returns **only qualifying factor vectors**, plus evidence for **every observed layer**. It does not mutate installed state. A high outlier score can still lead to `no_gain`. The CPU fixture injects a simulated kernel; the native adapter supplies its selected low-precision kernel.
 
@@ -133,29 +140,79 @@ Relevant code: [`activation_windows`](../qorerl/recipes/calibration.py), [`prepa
 
 ### Why the BF16 reference is local
 
-The current comparison asks: **for inputs the active training configuration actually produces, does changing this projection's S reduce its forward error?** It holds the captured input, current canonical weight and low-precision kernel fixed, and varies the smoothing factors. This isolates the local effect of the change on those inputs; it is not a full-model ablation or a guarantee of minimal impact on training.
+The local comparison asks: **for inputs the active training configuration actually produces, does changing this projection's S reduce its forward error?** It holds the captured input, current canonical weight and low-precision kernel fixed, and varies the smoothing factors. This isolates the local effect of the change on those inputs; it is not a full-model ablation or a guarantee of minimal impact on training.
 
 | Reference | Input and execution | What it establishes |
 | --- | --- | --- |
 | **Local BF16 comparison — implemented** | Reuse X captured from the active recipe, then compute only this projection as `F.linear(X, W)` in BF16. | A common reference for comparing the old and proposed S on the same input. Upstream low-precision effects remain in X. |
-| **Full-model BF16 replay — not performed by this calibration path** | Run the recorded tokens through the whole model in BF16, at the same current weights, and collect a separate set of inputs `X_bf16`. | A diagnostic reference that removes upstream low-precision quantization from that replay. It answers how the current weights behave under BF16 execution. |
+| **Full-model BF16 replay — used by `model_logits`** | Run the recorded tokens through the whole model in BF16, at the same current weights, and collect a separate set of inputs `X_bf16`. | A diagnostic reference that removes upstream low-precision quantization from that replay. It answers how the current weights behave under BF16 execution. |
 
 Full-model BF16 inputs still depend on all preceding weights, attention and nonlinear operations, as well as BF16 rounding. An outlier may already exist in that computation, or upstream quantization may introduce or amplify it in the active path. Full-model BF16 replay can help investigate that distinction; it does not remove upstream influence altogether or identify a training failure's cause by itself. The weights also retain their training history: this replay would not reproduce a model trained entirely in BF16 from the beginning.
 
-Fitting on `X_bf16` would target a different input distribution from the one the low-precision model currently encounters, so it is not automatically a better calibration source. The current design fits on actual execution inputs and uses a shared local BF16 reference for comparison. It runs the old, reference and candidate **projection calculations** on held-out rows; it does not run three complete models or propagate those comparison outputs through later layers.
+Fitting on `X_bf16` targets a different input distribution from the one the low-precision model currently encounters, so it is not automatically a better calibration source. Local mode fits on actual execution inputs and uses a shared local BF16 reference for comparison. It runs the old, reference and candidate **projection calculations** on held-out rows; it does not run three complete models or propagate those comparison outputs through later layers.
 
 ### What happens when several layers qualify together
 
-Candidates are evaluated per layer, but one artifact can contain **several qualifying layers**, which are merged into the active state together after approval. Consider layers 7 and 20:
+In local mode, candidates are evaluated per layer, but one artifact can contain **several qualifying layers**, which are merged into the active state together after approval. Consider layers 7 and 20:
 
 1. Replay with the active recipe collects `X7_old` and `X20_old`. Layer 7's proposed S is evaluated on `X7_old`; layer 20's proposed S is evaluated on `X20_old`. Preparation leaves the installed factors unchanged throughout these comparisons.
 2. If both qualify, the candidate contains both updates. After application, layer 7's new S can change its quantized output. That change propagates through the intervening computations, so layer 20 may now receive `X20_new` rather than the `X20_old` used to qualify its candidate.
 
-Layer 20's improvement on `X20_old` therefore does not establish an improvement on `X20_new`. **Individually better local candidates do not guarantee a better combined model.** The current implementation neither recalibrates downstream layers after each upstream proposal nor replays the full candidate combination before publication. A later calibration observes the updated execution path, but it does not validate the combination before the intervening batches run.
+Layer 20's improvement on `X20_old` therefore does not establish an improvement on `X20_new`. **Individually better local candidates do not guarantee a better combined model.** Local mode neither recalibrates downstream layers after each upstream proposal nor replays the full candidate combination before publication. A later calibration observes the updated execution path, but it does not validate the combination before the intervening batches run.
 
 The viewer's per-layer bars and averages must be read with that limitation: they are comparisons on previously captured inputs, not measurements of the published combination's end-to-end benefit. Coordinated publication ensures that learner and rollout acknowledge the same recipe state; it does not establish that the combination improves numerical or task quality.
 
-Full-model candidate validation is [deferred in the roadmap](../todo.md#p1--observe-pause-adjust-and-resume). It would compare the current configuration and the complete proposed combination at fixed weights on held-out token sequences, letting each run generate its own downstream activations. That is a separate check from both local BF16 comparison and an optional full-model BF16 diagnostic reference; no such validation stage is implemented yet.
+The `model_logits` mode below evaluates the complete combination before review. It provides a model-level numerical check, while local mode remains available for projection-level diagnosis.
+
+### Model-logits mode: fit on BF16 inputs, evaluate the complete combination
+
+Replace the local error cap with an explicit model-level scope:
+
+```json
+"recipe_calibration": {
+  "evaluation_scope": "model_logits",
+  "refresh_every_optimizer_steps": 20,
+  "max_rows": 128,
+  "discover_outliers": true,
+  "min_relative_improvement": 0.0,
+  "max_logits_relative_l2": null,
+  "approval": "manual"
+}
+```
+
+`max_logits_relative_l2` optionally caps the candidate's joint logits error. It cannot be combined with the local-only `max_activation_relative_l2`. Scope, overlay expansion and approval permissions remain unchanged. Discovery-only uses `local`; joint evaluation requires a candidate-capable recipe.
+
+```mermaid
+flowchart TD
+    A[Freeze current canonical weights and recorded token contexts] --> B[Full-model BF16 replay]
+    B --> C[Capture authorized down_proj inputs<br/>Discover outliers and fit one set of factors]
+    B --> R[Retain BF16 logits at held-out token positions]
+    A --> D[Replay current low-precision recipe<br/>with current factors]
+    C --> E[Replay low-precision model<br/>with all proposed factors together]
+    R --> F{Does the whole candidate reduce<br/>logits relative L2 and satisfy limits?}
+    D --> F
+    E --> F
+    F -->|Yes| G[Record joint evidence · review · publish]
+    F -->|No| H[Record failure · keep current recipe]
+    classDef replay fill:#edf4fb,stroke:#7192ae,color:#18323b
+    classDef decision fill:#e7f4f0,stroke:#4b9a8b,color:#18323b
+    class A,B,C,D,E,R replay
+    class F,G,H decision
+```
+
+1. **Reference and discovery.** `CalibrationReplay` replays the bounded, deduplicated contexts with all installed low-precision projections bypassed. The native adapter calls the original BF16 forwards using canonical W. This also bypasses low-precision projections outside the editable SmoothQuant overlay; only authorized targets are captured. Fitting uses the first half of the distinct input rows, while the remaining positions supply BF16 reference logits.
+2. **Fit the whole proposal.** `smoothquant_model._fit_joint_factors` discovers outliers on those BF16-path fitting rows and fits S for selected targets. It retains existing factors elsewhere. It does **not** discard a layer based on local projection error before testing the combination. Factors that do not change are omitted.
+3. **Replay current and candidate.** At the same weights and on the same recorded tokens, run the current low-precision configuration, then a private copy of its state containing **all** proposed changes. Each run produces its own downstream activations. Thus a change to layer 7 can change the input of layer 20 during candidate evaluation. None of these runs samples new responses.
+4. **Evaluate final logits.** For held-out positions and the entire vocabulary, compute `current_relative_l2 = ||Z_current - Z_bf16||₂ / ||Z_bf16||₂` and `candidate_relative_l2 = ||Z_candidate - Z_bf16||₂ / ||Z_bf16||₂`. The norm spans all retained entries; it is not a mean of layer errors. A candidate must strictly improve, meet `min_relative_improvement`, and satisfy the optional logits cap. Nonfinite candidate logits or an invalid fitted factor reject the complete proposal. A zero reference norm produces no proposal. Backend execution errors propagate as failures rather than being classified as numerical rejection.
+5. **Review the combination as one change.** Only a jointly qualifying set becomes an artifact. Its model comparison is recorded and bound to the same review digest as its factors, source policy and checkpoint. Rejection leaves the current state intact. There is no automatic subset search. Approval still uses checkpointing, recipe application and coordinated publication before the next batch.
+
+Preparation never updates canonical parameters or optimizer state. Provisional executions isolate recipe state and its device caches, disable probes, run in evaluation/no-grad mode, and restore incoming state references, module modes, call counters and Torch CPU/CUDA RNG even on failure. Native support remains the existing single-model-rank adapter. Local CPU tests include explicit native adapter stubs, not GPU execution.
+
+The CPU fixture identifies its reference as `reference_execution: "cpu_fixture"`: its RNN/head remain FP32 and its low-precision arithmetic is simulated. A native reference is labeled `"bf16"`. Neither a CPU chart nor a passing CPU workflow is native BF16/MXFP8 validation.
+
+**Limits.** BF16 replay removes low-precision execution effects from this reference, not the model's training history. The candidate is fitted to BF16 activations but evaluated with its own low-precision activations, so this distribution difference is measured rather than assumed harmless. The holdout excludes fitting token positions, but can share response history; independent prompt validation is still needed. Lower held-out logits error is not proof of RL convergence or reward improvement. This mode adds up to three full-model replays of the bounded contexts, stores reference/candidate logits on CPU, and temporarily retains captured activations. Native wall time and peak memory must be measured.
+
+Entry points: [replay execution](../qorerl/engines/calibration_replay.py), [joint fitting and decision](../qorerl/recipes/smoothquant_model.py), [CPU example](../configs/grpo_cpu_smoothquant_logits.json), [single-GPU example](../configs/grpo_single_gpu_smoothquant_logits.json), [isolation and regression tests](../tests/test_model_calibration.py).
 
 ## 3. How evidence, candidates and decisions are written
 
@@ -233,7 +290,9 @@ Per-layer statuses and run-level events answer different questions:
 | --- | --- |
 | `discovered` | Selected by discovery; may be the final result in discovery-only mode. |
 | `not_selected` | Did not meet the discovery threshold; no candidate comparison. |
-| `proposed` | Passed the recipe's local comparison; not yet proof of application. |
+| `proposed` | Passed the configured local or joint comparison; not yet proof of application. |
+| `model_rejected` | A fitted layer was part of a rejected joint proposal; see `comparison.reason`. |
+| `unchanged` | Joint fitting produced the already active factor vector. |
 | `no_gain` | No strict improvement, insufficient requested gain, or unchanged factors. Both measured errors remain visible when available. |
 | `activation_cost_exceeded` | First activation exceeds the configured output-error cap, despite an improvement. “Cost” here is error, not runtime or FLOPs. |
 | `insufficient_rows`, `insufficient_signal`, `invalid_candidate` | Evidence or candidate is unusable; `reason` explains why. |
@@ -247,6 +306,36 @@ Per-layer statuses and run-level events answer different questions:
 | `imported` | After applying an offline initial artifact and publishing it before first sampling. This has no newly measured comparison. |
 
 `append_json` writes with `allow_nan=False` and ends each event with a newline. The driver is the writer; the learner returns the artifact and evidence over Ray. These logs are not a transactional database. Checkpoints use a temporary directory and rename it into place only after their files exist.
+
+### Where the joint comparison is recorded
+
+Model mode adds `comparison` to both the `evaluated` event and `candidate.json`. Per-layer `evidence` retains outliers, row counts and the joint decision's layer statuses, with local error fields set to `null`. This example is from the first batch of the CPU simulation config, **not a GPU measurement**:
+
+```json
+{
+  "comparison": {
+    "scope": "model_logits",
+    "reference": "full_model_bf16",
+    "activation_source": "full_model_bf16",
+    "reference_execution": "cpu_fixture",
+    "fit_rows": 4,
+    "heldout_rows": 5,
+    "current_relative_l2": 0.04761516112516803,
+    "candidate_relative_l2": 0.03801908469524742,
+    "relative_improvement": 0.20153405350650802,
+    "min_relative_improvement": 0.0,
+    "max_logits_relative_l2": null,
+    "targets": [
+      "model.layers.0.mlp.down_proj.weight",
+      "model.layers.1.mlp.down_proj.weight"
+    ],
+    "status": "proposed",
+    "reason": null
+  }
+}
+```
+
+This is one model-level result; it does not claim that each layer improved by 20.15%. All proposed factors enter review together, and the joint evidence is part of the review digest. A rejected evaluation still records its comparison and reason, but creates no applicable artifact.
 
 ### Bind approval to the exact saved proposal
 
@@ -270,9 +359,13 @@ Relevant code: [review envelope and validation](../qorerl/runtime/calibration.py
 
 Each `evaluated` event becomes a selectable window. The page shows its run, batch, optimizer counter, evaluation policy, sample policy and evidence. Per-layer paired error bars compare current/candidate values; the second chart displays outlier scores and their thresholds. The layer table includes `activate`/`refresh`, fitting/held-out row counts, status and reason. The event table separately displays linked approvals/publications.
 
-The summary computes equal-weight means of current and candidate errors over **all complete pairs in the selected window**, including `no_gain` candidates. It then displays `(mean_candidate - mean_current) / mean_current * 100`. A reduction is negative on the dashboard, whereas `relative_improvement` in evidence is positive. This summary is neither the effect of the applied combination nor an average of per-layer percentage improvements. “Proposed / observed” counts `status == "proposed"` against the number of evidence rows, not all model layers.
+In local mode, the summary computes equal-weight means of current and candidate errors over **all complete pairs in the selected window**, including `no_gain` candidates. It then displays `(mean_candidate - mean_current) / mean_current * 100`. A reduction is negative on the dashboard, whereas `relative_improvement` in evidence is positive. This summary is neither the effect of the applied combination nor an average of per-layer percentage improvements. “Proposed / observed” counts `status == "proposed"` against the number of evidence rows, not all model layers.
 
 Missing values stay `null` and appear as `—` or `×`, never zero. Different weight versions are not merged into one layer comparison. The viewer recalculates relative improvement from each complete error pair. `evaluation_seconds` is preparation wall time, including the driver/Ray wait; `apply_publish_seconds` is application and publication wall time. Neither is operator latency or compute saved.
+
+In `model_logits` mode the error chart contains **one current/candidate logits pair**, and the summary is its model-level error change. The outlier chart and layer table still show every observed layer. Per-layer output errors are `null`, because this mode does not perform local comparisons. The context shows joint status/reason, reference execution and held-out row count; HTML/SVG/PNG exports preserve the scope. The local-mode means above are never substituted for joint logits evidence.
+
+![Joint logits view exported from the CPU simulation, not GPU validation](assets/smoothquant-logits-cpu.png)
 
 ### Join a decision across resume directories
 
@@ -301,6 +394,9 @@ Images summarize the selected window; they are not a full event archive. Keep th
 Relevant code: [file parsing and joins](../qorerl/observability/calibration.py), [HTTP server and HTML export](../qorerl/observability/viewer.py), [charts, polling and image export](../qorerl/observability/calibration.html), [CLI](../qorerl/cli.py).
 
 ## 5. Reproduce the complete workflow on CPU
+
+The commands below demonstrate `local`. To exercise joint logits evaluation, use `configs/grpo_cpu_smoothquant_logits.json` in both train commands and new output directories. Review, related-run linking and export commands are unchanged. A later jointly qualifying candidate can pause again; follow that run's `summary.json`.
+
 
 Run from the repository root with the project environment installed. Each training output directory must be new. The [CPU config](../configs/grpo_cpu_smoothquant.json) uses a tiny fixture, simulated low precision, three initial SmoothQuant layers and calibration every actual update.
 
@@ -336,7 +432,7 @@ Verify three different facts: (1) evidence explains which layer qualified; (2) `
 
 ## 6. Interpret the result at its measured scope
 
-Calibration measures **local forward error on sampled inputs from the active recipe**. As explained in section 2, its BF16 reference is local, and joint application can change downstream inputs. It does not establish which layer caused an end-to-end training failure, measure gradient error, or prove reward, convergence, FLOP or throughput gains. Full-model candidate validation remains deferred, and even that additional check would not replace training-level quality and cost evaluation.
+Local mode measures projection error on inputs produced by the active recipe. Model-logits mode measures the complete candidate's output against full-model BF16 at fixed current weights. The latter includes interactions between proposed changes but only on its bounded held-out token positions. Neither mode establishes the cause of an end-to-end failure, measures gradient error, or proves reward, convergence, FLOP or throughput gains. Training-level quality and cost still need separate evaluation.
 
 SmoothQuant's viewer consumes `calibration.jsonl`; it does **not** require the separate `recipe_observation` probe. That probe compares fixed BF16/MXFP8/Hadamard methods and writes `recipe_metrics.jsonl`. Enabling it for SmoothQuant is not the way to obtain these charts. See [Recipe Insights](recipe-insights.md) for that separate path.
 

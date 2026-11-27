@@ -86,6 +86,12 @@ class TrainConfig:
         calibration = self.active_calibration
         if (
             calibration
+            and calibration.evaluation_scope == "model_logits"
+            and not hasattr(recipe.candidate_handler, "prepare_model_candidate")
+        ):
+            raise ValueError("This recipe does not support model_logits candidate evaluation")
+        if (
+            calibration
             and recipe.candidate_handler is None
             and not (calibration.discovery_only and not self.is_cpu_test)
         ):

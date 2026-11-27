@@ -21,11 +21,15 @@ class MegatronRecipeInstallation:
         self.calls = {name: 0 for name in state.targets}
         self.observer = None
         self.calibrator = None
+        self.reference_mode = False
         self.weights = {name: module.weight for name, module in targets}
+        self.reference_forwards = {name: module.forward for name, module in targets}
 
     def forward(self, module, x, name):
         if self.calibrator is not None:
             self.calibrator.capture(name, x)
+        if self.reference_mode:
+            return self.reference_forwards[name](x)
         if self.observer is not None:
             self.observer.capture(name, x, module.weight)
         self.calls[name] += 1

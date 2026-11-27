@@ -6,6 +6,13 @@
 
 本文按照这三个分工解读当前代码，重点说明数据从哪里来、怎样写入文件、怎样变成图表。配置与硬件准备见 [SmoothQuant 使用指南](recipes/dynamic-smoothquant.zh-CN.md)，原生实验验收见 [GPU 验证指南](gpu-validation.zh-CN.md)。下文可复现的例子使用真实 CPU 训练流程和量化模拟，不是原生 GPU 测量。
 
+两种评估范围复用相同的审核与发布流程：
+
+| `recipe_calibration.evaluation_scope` | 拟合输入 | 候选判断依据 |
+| --- | --- | --- |
+| `local`（默认） | 当前 recipe 执行路径中采集的输入 | 各投影相对局部 BF16 的输出误差，作为诊断工具 |
+| `model_logits`（显式开启） | 整模型 BF16 重放中采集的输入 | 当前方案与完整候选组合，分别相对整模型 BF16 的最终 logits 误差 |
+
 ## 1. 先看完整链路
 
 ```mermaid
@@ -14,13 +21,13 @@ flowchart TD
     B -->|否| NEXT[下一批训练]
     B -->|是| C
     subgraph COMPUTE[1 · 产生证据：learner 与 recipe]
-        C[重放去重后的 token 前缀<br/>沿用当前权重和已生效的 recipe<br/>采集本投影变换前的输入]
+        C[重放去重后的 token 前缀<br/>当前权重 · 按配置选择评估范围<br/>采集本投影变换前的输入]
         C --> D[在拟合行上发现 outlier<br/>拟合候选平滑因子 S]
-        D --> E[在留出行上比较当前方案与候选<br/>共同参照本层 BF16 输出]
+        D --> E[在留出行上比较当前方案与候选<br/>局部输出或整模型 logits 对照]
     end
     E --> F
     subgraph RECORD[2 · 记录与决策：driver]
-        F[把 evaluated 和逐层证据<br/>追加到 calibration.jsonl]
+        F[把 evaluated 和评估证据<br/>追加到 calibration.jsonl]
         F --> G{是否有合格候选？}
         G -->|是| H[保存变更前的检查点<br/>candidate.json + metadata.json + learner.pt]
         H --> I{人工确认或自动规则决定}
@@ -83,7 +90,7 @@ driver 在本批训练更新和常规权重发布后，调用 `crosses_interval(
 
 对应代码：[校准配置与通用发现](../qorerl/recipes/calibration.py)、[RecipeState 的观测范围](../qorerl/recipes/state.py)、[周期判断](../qorerl/runtime/calibration.py)、[训练 driver](../qorerl/runtime/ray_runtime.py)。
 
-### 从刚训练完的 batch 收集输入
+### 局部模式：从刚训练完的 batch 收集输入
 
 `SingleRankGRPOLearner.prepare_candidate(batch)` 先检查样本策略，再采集输入，最后通过 `RecipeSpec.candidate_handler` 调用具体 recipe。SmoothQuant 自己实现拟合和应用，driver 不计算 S。
 
@@ -101,7 +108,7 @@ driver 同时记录 `sample_policy`（生成这些 token 的策略）和 `policy
 
 对应代码：[前缀重放与采集](../qorerl/engines/single_rank_learner.py)、[原生投影适配](../qorerl/recipes/megatron_mxfp8.py)、[recipe 分派](../qorerl/recipes/spec.py)。
 
-### 发现 outlier、拟合 S，再比较候选
+### 局部模式：发现 outlier、拟合 S，再比较候选
 
 对于每个输入通道 j，拟合过程计算：
 
@@ -125,7 +132,7 @@ outlier 分数描述本层各输入通道幅度的不均衡程度，不是 outli
 | 当前方案：`activate` | 直接执行低精度前向，不叠加 SmoothQuant |
 | 候选方案 | 用 `X_heldout / S_new` 和 `W * S_new` 执行同一个低精度 kernel |
 
-误差为 `||Y - Y_ref||₂ / ||Y_ref||₂`。只有候选误差严格下降、相对降幅 `(before - after) / before >= min_relative_improvement`，且因子确实改变，才进入提案。首次激活还必须有 outlier 证据，并满足配置的 `max_activation_relative_l2` 上限。`discover_outliers: false` 允许已有 SmoothQuant 层跳过 outlier 阈值筛选，新激活层仍需通过该阈值。
+误差为 `||Y - Y_ref||₂ / ||Y_ref||₂`。只有候选误差严格下降、相对降幅 `(current_relative_l2 - candidate_relative_l2) / current_relative_l2 >= min_relative_improvement`，且因子确实改变，才进入提案。首次激活还必须有 outlier 证据，并满足配置的 `max_activation_relative_l2` 上限。`discover_outliers: false` 允许已有 SmoothQuant 层跳过 outlier 阈值筛选，新激活层仍需通过该阈值。
 
 `prepare_smoothquant_candidate` 返回**合格层的因子向量**和**全部观测层的证据**，不会修改已安装的状态。有明显 outlier 的层，也可能得到 `no_gain`。CPU 测试注入模拟 kernel，原生适配器传入其所选低精度 kernel。
 
@@ -133,29 +140,79 @@ outlier 分数描述本层各输入通道幅度的不均衡程度，不是 outli
 
 ### 为什么使用局部 BF16 对照
 
-当前比较要回答的问题是：**面对当前训练配置实际产生的输入，改变这个投影的 S，能否降低其前向误差？** 比较固定了采集输入、当前原始权重和低精度 kernel，只改变平滑因子。这样可以单独观察这组输入上的局部改动效果；它不是整模型消融实验，也不能保证对训练的影响最小。
+局部比较要回答的问题是：**面对当前训练配置实际产生的输入，改变这个投影的 S，能否降低其前向误差？** 比较固定了采集输入、当前原始权重和低精度 kernel，只改变平滑因子。这样可以单独观察这组输入上的局部改动效果；它不是整模型消融实验，也不能保证对训练的影响最小。
 
 | 对照方式 | 输入和执行方式 | 能说明什么 |
 | --- | --- | --- |
 | **局部 BF16 对照：已实现** | 复用当前 recipe 下采集的 X，只对这个投影执行 BF16 的 `F.linear(X, W)`。 | 为同一输入上的旧 S、新 S 提供共同参考。X 中仍保留上游低精度计算的影响。 |
-| **整模型 BF16 重放：当前校准链路不执行** | 用同一份当前权重，让记录的 token 在整个 BF16 模型上前向，另外采集 `X_bf16`。 | 提供排除了上游低精度量化影响的诊断参考，观察当前权重在 BF16 执行下的行为。 |
+| **整模型 BF16 重放：由 `model_logits` 模式执行** | 用同一份当前权重，让记录的 token 在整个 BF16 模型上前向，另外采集 `X_bf16`。 | 提供排除了上游低精度量化影响的诊断参考，观察当前权重在 BF16 执行下的行为。 |
 
 整模型 BF16 的输入仍然取决于前面各层的权重、Attention、非线性运算以及 BF16 舍入。有些 outlier 在这种计算下本来就存在，有些则可能由当前路径中的上游量化引入或放大。整模型 BF16 重放可以帮助研究这种区别，但它没有消除全部上游影响，也不能单独定位训练失败的根因。而且，当前权重已经包含此前训练的历史；切回 BF16 重放，无法还原“假如从一开始就用 BF16 训练，此时会得到的模型”。
 
-在 `X_bf16` 上拟合，面向的是另一种输入分布，与低精度模型当前实际遇到的输入可能不同，因此它不自动成为更好的校准数据来源。当前设计选择实际执行路径中的输入，再用共同的局部 BF16 输出比较候选。旧方案、参考和候选执行的是留出行上的**投影计算**，不会分别运行三个完整模型，也不会把比较结果继续传入后面的层。
+在 `X_bf16` 上拟合，面向的是另一种输入分布，与低精度模型当前实际遇到的输入可能不同，因此它不自动成为更好的校准数据来源。局部模式选择实际执行路径中的输入，再用共同的局部 BF16 输出比较候选。旧方案、参考和候选执行的是留出行上的**投影计算**，不会分别运行三个完整模型，也不会把比较结果继续传入后面的层。
 
 ### 多个层同时通过时，会发生什么
 
-候选按层评估，但一个 artifact 可以包含**多个合格层**，获批后将这些更新一起合并到当前状态中。以第 7、20 层为例：
+局部模式下，候选按层评估，但一个 artifact 可以包含**多个合格层**，获批后将这些更新一起合并到当前状态中。以第 7、20 层为例：
 
 1. 按当前 recipe 重放，得到 `X7_old` 和 `X20_old`。第 7 层的新 S 在 `X7_old` 上比较，第 20 层的新 S 在 `X20_old` 上比较。准备期间，各层实际安装的平滑因子始终不变。
 2. 如果两层都通过，候选包含两处更新。应用后，第 7 层的新 S 可能改变其量化输出；变化经过中间各层的计算，传到第 20 层时，输入可能已经变成 `X20_new`，不再是当初评估候选时的 `X20_old`。
 
-第 20 层在 `X20_old` 上改善，不能证明它在 `X20_new` 上也改善。**逐层比较都更好，不保证组合后的整模型更好。** 当前实现不会每提出一处上游变更就重新校准下游，也没有在发布前重放完整候选组合。后续校准可以观测更新后的执行路径，但这不能在中间那些训练批次运行之前验证组合效果。
+第 20 层在 `X20_old` 上改善，不能证明它在 `X20_new` 上也改善。**逐层比较都更好，不保证组合后的整模型更好。** 局部模式不会每提出一处上游变更就重新校准下游，也没有在发布前重放完整候选组合。后续校准可以观测更新后的执行路径，但这不能在中间那些训练批次运行之前验证组合效果。
 
 因此，页面上的逐层柱状图和均值，应理解为此前采集输入上的对照，不能解释为已发布组合的端到端收益。协同发布保证 learner 和 rollout 确认同一份 recipe 状态，不代表这个组合的数值或任务效果已经得到验证。
 
-整模型候选验证已[记入后续计划](../todo.md#p1--observe-pause-adjust-and-resume)，暂不开发。它将固定权重，在留出的 token 序列上比较当前配置与完整候选组合，让两次执行各自产生下游激活。这个步骤与局部 BF16 对照、可选的整模型 BF16 诊断参考分别承担不同职责，当前尚未实现。
+下面的 `model_logits` 模式在审核前验证完整组合，同时保留局部模式作为投影级诊断工具。
+
+### 整模型 logits 模式：BF16 输入拟合，完整组合验证
+
+用以下配置显式开启，并移除局部模式的误差上限：
+
+```json
+"recipe_calibration": {
+  "evaluation_scope": "model_logits",
+  "refresh_every_optimizer_steps": 20,
+  "max_rows": 128,
+  "discover_outliers": true,
+  "min_relative_improvement": 0.0,
+  "max_logits_relative_l2": null,
+  "approval": "manual"
+}
+```
+
+`max_logits_relative_l2` 可选，用于限制整组候选的 logits 相对误差；不能与只适用于局部模式的 `max_activation_relative_l2` 混用。层范围、SmoothQuant 扩展权限和批准方式保持原语义。只发现不调整仍使用 `local`；整模型评估需要 recipe 支持候选。
+
+```mermaid
+flowchart TD
+    A[固定当前原始权重和记录的 token 上下文] --> B[整模型 BF16 重放]
+    B --> C[采集授权范围内的 down_proj 输入<br/>发现 outlier · 拟合一组 S]
+    B --> R[保留留出位置的 BF16 logits]
+    A --> D[当前低精度方案完整重放<br/>使用当前 S]
+    C --> E[整组候选一起进入低精度模型重放<br/>使用全部候选 S]
+    R --> F{整组候选是否降低 logits 相对 L2<br/>并满足配置条件？}
+    D --> F
+    E --> F
+    F -->|是| G[记录联合证据 · 审核 · 发布]
+    F -->|否| H[记录原因 · 保留当前方案]
+    classDef replay fill:#edf4fb,stroke:#7192ae,color:#18323b
+    classDef decision fill:#e7f4f0,stroke:#4b9a8b,color:#18323b
+    class A,B,C,D,E,R replay
+    class F,G,H decision
+```
+
+1. **参考与发现。** `CalibrationReplay` 用去重、限量后的上下文重放，临时绕过全部已安装的低精度投影。原生适配器调用保存的原始 BF16 forward，使用原始 W；即使某个低精度投影不允许更新 SmoothQuant，也会在参考重放中被绕过。只采集授权目标，前半不同 token 行用于拟合，后半位置用于保留 BF16 logits。
+2. **拟合整组方案。** `smoothquant_model._fit_joint_factors` 在 BF16 路径的拟合行上发现 outlier，给选中层拟合 S，其他层保留原状态。**不会先按局部投影误差筛掉某一层。** 没有改变的因子不进入候选。
+3. **当前与候选分别完整重放。** 固定权重和记录的 token，执行当前低精度方案，再用包含**全部拟合改动**的私有状态执行候选。两次执行各自产生下游激活，因此候选第 7 层的改动会真正传播到第 20 层。不会重新采样回答。
+4. **比较最终 logits。** 在相同留出位置、整个词表上，计算 `current_relative_l2 = ||Z_current - Z_bf16||₂ / ||Z_bf16||₂` 和 `candidate_relative_l2 = ||Z_candidate - Z_bf16||₂ / ||Z_bf16||₂`。范数覆盖全部保留元素，不是逐层误差均值。候选必须严格变好、达到 `min_relative_improvement`，且不超过可选 logits 上限。候选 logits 非有限或任何拟合因子无效时拒绝整组；参考范数为零时不提出候选。后端执行异常直接报告失败，不伪装成数值候选被拒。
+5. **整组审核、整组应用。** 只有联合比较通过才创建 artifact。联合证据与因子、源策略及检查点绑定到同一个审核摘要；拒绝保持当前方案。当前不自动搜索更优子集。获批后仍经过保存、recipe 应用、协同发布，所有 rollout 确认后才进入下一批。
+
+准备期间不更新原始参数或 optimizer。临时执行隔离 recipe 状态及其设备缓存、关闭观测探针，在 eval/no-grad 下运行；即使异常，也恢复原状态引用、各模块模式、调用计数和 Torch CPU/CUDA RNG。原生执行仍限于现有的单模型 rank 适配器。本地测试包含原生适配器桩测试，不等于 GPU 验证。
+
+CPU fixture 使用 `reference_execution: "cpu_fixture"` 标识：其中 RNN/head 仍是 FP32，低精度运算是模拟；原生参考标识为 `"bf16"`。CPU 图表或 CPU 链路通过，不能当作原生 BF16/MXFP8 实测。
+
+**局限。** BF16 参考消除了该次执行的低精度量化影响，没有抹去权重的训练历史。候选基于 BF16 激活拟合，但评估时使用自己产生的低精度激活，因此会实际检验这两种输入分布差异的后果。拟合与留出位置不同，但可能共享回答历史，仍需独立 prompt 验证。留出 logits 误差降低，不等于 RL 训练收敛或奖励改善。该模式最多增加三次有界上下文的整模型重放，在 CPU 保存参考及候选 logits，并临时保留采集激活；原生耗时、峰值内存/显存仍待测量。
+
+代码入口：[重放执行](../qorerl/engines/calibration_replay.py)、[联合拟合与判定](../qorerl/recipes/smoothquant_model.py)、[CPU 配置](../configs/grpo_cpu_smoothquant_logits.json)、[单 GPU 配置](../configs/grpo_single_gpu_smoothquant_logits.json)、[隔离与组合退化测试](../tests/test_model_calibration.py)。
 
 ## 3. 如何写入校准数据、候选和决策
 
@@ -233,7 +290,9 @@ results/sq-accepted/                 # 人工恢复后使用新的输出目录
 | --- | --- |
 | `discovered` | 被发现阶段选中；只发现模式可以到这里结束。 |
 | `not_selected` | 未达到发现阈值，没有比较候选误差。 |
-| `proposed` | 通过局部比较，尚不能说明已经应用。 |
+| `proposed` | 通过配置指定的局部或联合比较，尚不能说明已经应用。 |
+| `model_rejected` | 本层已拟合，但所属整组候选未通过；查看 `comparison.reason`。 |
+| `unchanged` | 联合拟合得到的因子与当前值相同。 |
 | `no_gain` | 没有严格改善、降幅不足，或因子未改变；已测得的两份误差仍保留。 |
 | `activation_cost_exceeded` | 首次激活虽有改善，误差仍超上限。此处 cost 指误差，不是耗时或 FLOPs。 |
 | `insufficient_rows`、`insufficient_signal`、`invalid_candidate` | 输入证据或候选不可用，原因写在 `reason`。 |
@@ -247,6 +306,36 @@ results/sq-accepted/                 # 人工恢复后使用新的输出目录
 | `imported` | 启动时应用离线 artifact，并在首次采样前发布后；没有新测得的比较。 |
 
 `append_json` 使用 `allow_nan=False` 序列化并追加换行符。learner 通过 Ray 返回 artifact 和 evidence，driver 统一写日志。这不是事务数据库。检查点先写临时目录，文件齐全后再通过目录改名对外可见。
+
+### 联合比较写在哪里
+
+整模型模式在 `evaluated` 事件和 `candidate.json` 中增加 `comparison`；逐层 `evidence` 保留 outlier、行数和整组判定映射后的状态，局部误差字段为 `null`。下例来自 CPU 模拟配置第一批的联合比较，**不是 GPU 测量**：
+
+```json
+{
+  "comparison": {
+    "scope": "model_logits",
+    "reference": "full_model_bf16",
+    "activation_source": "full_model_bf16",
+    "reference_execution": "cpu_fixture",
+    "fit_rows": 4,
+    "heldout_rows": 5,
+    "current_relative_l2": 0.04761516112516803,
+    "candidate_relative_l2": 0.03801908469524742,
+    "relative_improvement": 0.20153405350650802,
+    "min_relative_improvement": 0.0,
+    "max_logits_relative_l2": null,
+    "targets": [
+      "model.layers.0.mlp.down_proj.weight",
+      "model.layers.1.mlp.down_proj.weight"
+    ],
+    "status": "proposed",
+    "reason": null
+  }
+}
+```
+
+`comparison` 是一份整模型结果；两层各自没有独立的 20.15% 改善。全部候选因子作为一组传入审核，联合证据也包含在审核摘要中。没有通过时仍写 `evaluated` 与原因，但不创建可应用 artifact。
 
 ### 审核必须绑定当时的模型状态
 
@@ -270,9 +359,13 @@ artifact 为兼容仍使用 schema-1 的 `kind: "smoothquant_scales"`、`scales`
 
 每个 `evaluated` 事件成为一个可选窗口。页面显示运行段、训练批次、optimizer 计数、评估策略和采样策略。第一张图用成对柱状图比较当前/候选误差，第二张图显示 outlier 分数和阈值。层表列出 `activate`/`refresh`、拟合/留出行数、状态和原因，事件表另行显示关联的审核及发布结果。
 
-摘要取**本窗口全部完整比较对**的当前误差均值和候选误差均值，各层权重相同，包含 `no_gain` 候选。显示值为 `(mean_candidate - mean_current) / mean_current * 100`。页面上的误差下降是负值，证据中的 `relative_improvement` 则为正值。这个摘要既不是最终应用组合的收益，也不是各层改善百分比的平均。“Proposed / observed”的分母是本窗口 evidence 条数，不是模型总层数。
+局部模式的摘要取**本窗口全部完整比较对**的当前误差均值和候选误差均值，各层权重相同，包含 `no_gain` 候选。显示值为 `(mean_candidate - mean_current) / mean_current * 100`。页面上的误差下降是负值，证据中的 `relative_improvement` 则为正值。这个摘要既不是最终应用组合的收益，也不是各层改善百分比的平均。“Proposed / observed”的分母是本窗口 evidence 条数，不是模型总层数。
 
 缺失测量保留 `null`，显示为 `—` 或 `×`，不会补零；不同权重版本不会拼成一次比较。读取器按成对误差重新计算相对改善。`evaluation_seconds` 是准备过程的墙钟时间，包含 driver/Ray 等待；`apply_publish_seconds` 是应用和发布的墙钟时间。它们都不是算子耗时，也不代表节省的运算量。
+
+`model_logits` 模式的误差图只显示**一组当前/候选 logits 对比**，摘要使用这组整模型误差；outlier 图和层表仍覆盖全部观测层。逐层输出误差保留 `null`，因为本模式没有执行局部比较。上下文显示联合状态、原因、参考执行类型和留出位置数，HTML/SVG/PNG 导出同样标明范围。不会把局部误差均值冒充 logits 证据。
+
+![CPU 模拟导出的整组 logits 误差视图，不是 GPU 验证](assets/smoothquant-logits-cpu.png)
 
 ### 跨恢复目录关联一次决策
 
@@ -301,6 +394,9 @@ uv run qorerl inspect --run results/sq-accepted \
 对应代码：[读取与关联](../qorerl/observability/calibration.py)、[HTTP 服务及 HTML 导出](../qorerl/observability/viewer.py)、[图表、轮询和图片导出](../qorerl/observability/calibration.html)、[CLI](../qorerl/cli.py)。
 
 ## 5. 在 CPU 上走一遍完整流程
+
+本节原命令演示 `local`。要复现整模型版本，将两条 train 命令中的配置改为 `configs/grpo_cpu_smoothquant_logits.json`，并使用新的输出目录；人工接受、关联目录和导出命令不变。整模型候选可能在后续周期再次通过并暂停，应按该次 `summary.json` 继续处理。
+
 
 在已安装项目环境的仓库根目录执行，每次训练输出目录必须是新的。[CPU 配置](../configs/grpo_cpu_smoothquant.json)使用微型模型和低精度模拟，三层初始都启用 SmoothQuant，每次实际更新后校准。
 
@@ -336,7 +432,7 @@ uv run qorerl report --run results/sq-accepted --related-run results/sq-review \
 
 ## 6. 这些数据能说明什么
 
-校准测量的是**当前 recipe 所产生的采样输入上的局部前向误差**。如第 2 节所述，BF16 参考只作用于局部，多层一起应用还可能改变下游输入。它不能直接定位整次训练失败的根因，没有测量梯度误差，也不能证明奖励、收敛、FLOPs 或吞吐改善。整模型候选验证仍是待办；即使增加这个步骤，也不能替代训练层面的质量与成本评估。
+局部模式测量当前 recipe 输入上的投影误差；整模型模式在固定的当前权重下，对比完整候选与整模型 BF16 的 logits。后者包含多层改动的相互影响，但只覆盖采样的留出 token 位置。两者都不能直接定位训练失败根因，没有测量梯度误差，也不能证明奖励、收敛、FLOPs 或吞吐改善；仍需训练层面的质量和成本评估。
 
 SmoothQuant 展示读取 `calibration.jsonl`，**不需要**另开 `recipe_observation` 探针。后者比较固定 BF16/MXFP8/Hadamard 方案并写入 `recipe_metrics.jsonl`；给 SmoothQuant 开这个探针并不是获得本文图表的方式。那条独立链路见 [Recipe Insights](recipe-insights.zh-CN.md)。
 

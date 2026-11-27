@@ -10,6 +10,7 @@ from dataclasses import asdict
 
 import torch
 
+from qorerl.recipes.calibration import CandidatePreparation
 from qorerl.training.batching import collate_microbatch
 from qorerl.training.contracts import PolicyVersion
 from qorerl.training.objective import grpo_loss
@@ -145,12 +146,22 @@ class SingleRankGRPOLearner:
             t.policy_version != batch.policy_version for t in batch.trajectories
         ):
             raise ValueError("Calibration requires a nonempty rollout batch with consistent policy identity")
+        if config.evaluation_scope == "model_logits":
+            from qorerl.engines.calibration_replay import CalibrationReplay
+
+            replay = CalibrationReplay(self, batch.trajectories, config.max_rows)
+            return handler.prepare_model_candidate(
+                self.cfg, self.recipe_state, self.recipe_installation, replay
+            )
         samples = self._sample_calibration_inputs(batch.trajectories, config.max_rows)
         if not samples:
-            return None, []
+            return CandidatePreparation(None, [])
         if config.discovery_only:
-            return None, outlier_report(samples, config)
-        return handler.prepare_candidate(self.cfg, self.recipe_state, self.recipe_installation, samples)
+            return CandidatePreparation(None, outlier_report(samples, config))
+        candidate, evidence = handler.prepare_candidate(
+            self.cfg, self.recipe_state, self.recipe_installation, samples
+        )
+        return CandidatePreparation(candidate, evidence)
 
     def apply_candidate(self, artifact, *, initial=False):
         """Install the recipe payload and expose its new identity for weight publication."""
