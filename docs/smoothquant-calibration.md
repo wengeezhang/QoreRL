@@ -14,7 +14,7 @@ flowchart TD
     B -->|No| NEXT[Next training batch]
     B -->|Yes| C
     subgraph COMPUTE[1 · Produce evidence — learner and recipe]
-        C[Replay distinct token prefixes<br/>Capture inputs before the local transform]
+        C[Replay distinct token prefixes<br/>Current weights + active recipe<br/>Capture inputs before the local transform]
         C --> D[Discover outliers on fitting rows<br/>Fit candidate smoothing factors S]
         D --> E[Compare current and candidate<br/>on held-out rows against local BF16]
     end
@@ -89,7 +89,11 @@ Relevant code: [configuration and shared discovery](../qorerl/recipes/calibratio
 
 The learner replays **recorded tokens** using its updated model. It does not ask rollout to sample another set of responses. `_calibration_prefixes` builds contexts from `prompt_ids + response_ids[:-1]`, deduplicates shared causal prefixes and bounds the total number of new token rows. `_sample_calibration_inputs` replays one unpadded sequence at a time under `no_grad` and captures up to `max_rows` per observed projection.
 
-On the native learner, `MegatronRecipeInstallation.forward` calls `calibrator.capture(name, x)` **before** `transform_input` and `transform_weight`. Thus the captured X precedes this layer's SmoothQuant transformation, but it already contains the effects of upstream layers. Canonical W remains the model's BF16 weight, stored as `[output_channels, input_channels]`.
+Replay keeps the **currently installed execution configuration**. In the example above, the down projections in layers 7, 15 and 20 execute MXFP8 with their active smoothing factors `S_old`; layer 25's down projection executes direct MXFP8 until SmoothQuant is approved for it. Projections outside the low-precision scope keep their BF16 path. Collection does not switch the whole model to BF16 or install candidate factors.
+
+On the native learner, `MegatronRecipeInstallation.forward` calls `calibrator.capture(name, x)` **before** `transform_input` and `transform_weight`. It copies the target `down_proj` input, then continues forward with the active recipe. This is not a collection of whole Transformer-block outputs: attention and other MLP operations also contribute to the captured input. The capture routine detaches and clones the retained rows, so later transformations do not overwrite them.
+
+Thus X precedes **this projection's own** SmoothQuant transformation, but already contains the effects of upstream layers, including their quantization. Its BF16 storage dtype does not make it an activation from an all-BF16 model. Canonical W is the current model's BF16 weight before the local recipe transform, stored as `[output_channels, input_channels]`.
 
 `activation_windows` splits the bounded rows in order: the first `floor(n / 2)` rows fit the candidate, and the remainder evaluate it. Identical token prefixes are not repeated across this split, but both halves can still come from the same response; this is not an independent task-level validation set. Discovery-only mode uses all rows for discovery.
 
@@ -126,6 +130,32 @@ The measured error is `||Y - Y_ref||₂ / ||Y_ref||₂`. A proposal requires str
 `prepare_smoothquant_candidate` returns **only qualifying factor vectors**, plus evidence for **every observed layer**. It does not mutate installed state. A high outlier score can still lead to `no_gain`. The CPU fixture injects a simulated kernel; the native adapter supplies its selected low-precision kernel.
 
 Relevant code: [`activation_windows`](../qorerl/recipes/calibration.py), [`prepare_smoothquant_candidate`, `_fit_smoothing_factor`, `_error`](../qorerl/recipes/smoothquant.py).
+
+### Why the BF16 reference is local
+
+The current comparison asks: **for inputs the active training configuration actually produces, does changing this projection's S reduce its forward error?** It holds the captured input, current canonical weight and low-precision kernel fixed, and varies the smoothing factors. This isolates the local effect of the change on those inputs; it is not a full-model ablation or a guarantee of minimal impact on training.
+
+| Reference | Input and execution | What it establishes |
+| --- | --- | --- |
+| **Local BF16 comparison — implemented** | Reuse X captured from the active recipe, then compute only this projection as `F.linear(X, W)` in BF16. | A common reference for comparing the old and proposed S on the same input. Upstream low-precision effects remain in X. |
+| **Full-model BF16 replay — not performed by this calibration path** | Run the recorded tokens through the whole model in BF16, at the same current weights, and collect a separate set of inputs `X_bf16`. | A diagnostic reference that removes upstream low-precision quantization from that replay. It answers how the current weights behave under BF16 execution. |
+
+Full-model BF16 inputs still depend on all preceding weights, attention and nonlinear operations, as well as BF16 rounding. An outlier may already exist in that computation, or upstream quantization may introduce or amplify it in the active path. Full-model BF16 replay can help investigate that distinction; it does not remove upstream influence altogether or identify a training failure's cause by itself. The weights also retain their training history: this replay would not reproduce a model trained entirely in BF16 from the beginning.
+
+Fitting on `X_bf16` would target a different input distribution from the one the low-precision model currently encounters, so it is not automatically a better calibration source. The current design fits on actual execution inputs and uses a shared local BF16 reference for comparison. It runs the old, reference and candidate **projection calculations** on held-out rows; it does not run three complete models or propagate those comparison outputs through later layers.
+
+### What happens when several layers qualify together
+
+Candidates are evaluated per layer, but one artifact can contain **several qualifying layers**, which are merged into the active state together after approval. Consider layers 7 and 20:
+
+1. Replay with the active recipe collects `X7_old` and `X20_old`. Layer 7's proposed S is evaluated on `X7_old`; layer 20's proposed S is evaluated on `X20_old`. Preparation leaves the installed factors unchanged throughout these comparisons.
+2. If both qualify, the candidate contains both updates. After application, layer 7's new S can change its quantized output. That change propagates through the intervening computations, so layer 20 may now receive `X20_new` rather than the `X20_old` used to qualify its candidate.
+
+Layer 20's improvement on `X20_old` therefore does not establish an improvement on `X20_new`. **Individually better local candidates do not guarantee a better combined model.** The current implementation neither recalibrates downstream layers after each upstream proposal nor replays the full candidate combination before publication. A later calibration observes the updated execution path, but it does not validate the combination before the intervening batches run.
+
+The viewer's per-layer bars and averages must be read with that limitation: they are comparisons on previously captured inputs, not measurements of the published combination's end-to-end benefit. Coordinated publication ensures that learner and rollout acknowledge the same recipe state; it does not establish that the combination improves numerical or task quality.
+
+Full-model candidate validation is [deferred in the roadmap](../todo.md#p1--observe-pause-adjust-and-resume). It would compare the current configuration and the complete proposed combination at fixed weights on held-out token sequences, letting each run generate its own downstream activations. That is a separate check from both local BF16 comparison and an optional full-model BF16 diagnostic reference; no such validation stage is implemented yet.
 
 ## 3. How evidence, candidates and decisions are written
 
@@ -306,7 +336,7 @@ Verify three different facts: (1) evidence explains which layer qualified; (2) `
 
 ## 6. Interpret the result at its measured scope
 
-Calibration measures **local forward error on sampled inputs**. It does not establish which layer caused an end-to-end training failure, measure gradient error, or prove reward, convergence, FLOP or throughput gains. Updating several layers can change downstream inputs, which requires further training-level evaluation.
+Calibration measures **local forward error on sampled inputs from the active recipe**. As explained in section 2, its BF16 reference is local, and joint application can change downstream inputs. It does not establish which layer caused an end-to-end training failure, measure gradient error, or prove reward, convergence, FLOP or throughput gains. Full-model candidate validation remains deferred, and even that additional check would not replace training-level quality and cost evaluation.
 
 SmoothQuant's viewer consumes `calibration.jsonl`; it does **not** require the separate `recipe_observation` probe. That probe compares fixed BF16/MXFP8/Hadamard methods and writes `recipe_metrics.jsonl`. Enabling it for SmoothQuant is not the way to obtain these charts. See [Recipe Insights](recipe-insights.md) for that separate path.
 
