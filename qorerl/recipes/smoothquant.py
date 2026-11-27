@@ -102,7 +102,8 @@ class _NonfiniteProjection(ValueError):
     """An unusable transform can be rejected without masking backend exceptions."""
 
 
-def _error(fprop, x, weight, smoothing_factor, reference, reference_norm):
+def _measure_output_relative_l2(fprop, x, weight, smoothing_factor, reference, reference_norm):
+    """Run one projection configuration and measure relative L2 against its BF16 reference."""
     activation, transformed_weight = (
         (x, weight)
         if smoothing_factor is None
@@ -118,10 +119,10 @@ def _error(fprop, x, weight, smoothing_factor, reference, reference_norm):
         or output.device != reference.device
     ):
         raise ValueError("Quantized FPROP must return the paired BF16 output matrix")
-    error = torch.linalg.vector_norm(output.double() - reference.double()).item() / reference_norm
-    if not math.isfinite(error):
+    relative_l2 = torch.linalg.vector_norm(output.double() - reference.double()).item() / reference_norm
+    if not math.isfinite(relative_l2):
         raise _NonfiniteProjection("Nonfinite held-out quantized FPROP error")
-    return error
+    return relative_l2
 
 
 @torch.no_grad()
@@ -196,20 +197,20 @@ def prepare_smoothquant_candidate(
                 continue
             if activating:
                 try:
-                    before = _error(fprop, heldout, weight, None, reference, norm)
+                    before = _measure_output_relative_l2(fprop, heldout, weight, None, reference, norm)
                 except _NonfiniteProjection as exc:
                     event.update(status="invalid_candidate", reason=f"Direct low precision: {exc}")
                     continue
                 event["direct_low_precision_relative_l2"] = before
             else:
-                before = _error(fprop, heldout, weight, current_factor, reference, norm)
+                before = _measure_output_relative_l2(fprop, heldout, weight, current_factor, reference, norm)
             event["current_relative_l2"] = before
             candidate_factor = _fit_smoothing_factor(maxima, weight, current_factor, config.alpha)
             if not torch.isfinite(candidate_factor).all().item() or not (candidate_factor > 0).all().item():
                 event.update(status="invalid_candidate", reason="scale_outside_positive_fp32_range")
                 continue
             try:
-                after = _error(fprop, heldout, weight, candidate_factor, reference, norm)
+                after = _measure_output_relative_l2(fprop, heldout, weight, candidate_factor, reference, norm)
             except _NonfiniteProjection as exc:
                 event.update(status="invalid_candidate", reason=str(exc))
                 continue

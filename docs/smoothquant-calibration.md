@@ -129,7 +129,7 @@ The measured error is `||Y - Y_ref||₂ / ||Y_ref||₂`. A proposal requires str
 
 `prepare_smoothquant_candidate` returns **only qualifying factor vectors**, plus evidence for **every observed layer**. It does not mutate installed state. A high outlier score can still lead to `no_gain`. The CPU fixture injects a simulated kernel; the native adapter supplies its selected low-precision kernel.
 
-Relevant code: [`activation_windows`](../qorerl/recipes/calibration.py), [`prepare_smoothquant_candidate`, `_fit_smoothing_factor`, `_error`](../qorerl/recipes/smoothquant.py).
+Relevant code: [`activation_windows`](../qorerl/recipes/calibration.py), [`prepare_smoothquant_candidate`, `_fit_smoothing_factor`, `_measure_output_relative_l2`](../qorerl/recipes/smoothquant.py).
 
 ### Why the BF16 reference is local
 

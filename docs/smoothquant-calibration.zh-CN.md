@@ -129,7 +129,7 @@ outlier 分数描述本层各输入通道幅度的不均衡程度，不是 outli
 
 `prepare_smoothquant_candidate` 返回**合格层的因子向量**和**全部观测层的证据**，不会修改已安装的状态。有明显 outlier 的层，也可能得到 `no_gain`。CPU 测试注入模拟 kernel，原生适配器传入其所选低精度 kernel。
 
-对应代码：[`activation_windows`](../qorerl/recipes/calibration.py)、[`prepare_smoothquant_candidate`、`_fit_smoothing_factor`、`_error`](../qorerl/recipes/smoothquant.py)。
+对应代码：[`activation_windows`](../qorerl/recipes/calibration.py)、[`prepare_smoothquant_candidate`、`_fit_smoothing_factor`、`_measure_output_relative_l2`](../qorerl/recipes/smoothquant.py)。
 
 ### 为什么使用局部 BF16 对照
 
